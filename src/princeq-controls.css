@@ -1,0 +1,94 @@
+/* PrinceQ control typography, including Radix triggers rendered through asChild. */
+:root {
+  --princeq-control-font: 13px;
+  --princeq-control-line: 18px;
+}
+.princeq-app { font-size: 14px; line-height: 1.5; }
+
+/* Radix asChild replaces data-slot=button with the trigger's own slot.
+   Portalled controls also live outside princeq-app. Match their actual slots. */
+[data-slot="button"],
+button[data-slot$="-trigger"],
+[data-slot="alert-dialog-action"],
+[data-slot="alert-dialog-cancel"] {
+  font-size: var(--princeq-control-font);
+  line-height: var(--princeq-control-line);
+  font-weight: 500;
+}
+[data-slot="input"],
+[data-slot="textarea"],
+[data-slot="select-trigger"],
+[data-slot="native-select"],
+[data-slot="dropdown-menu-item"],
+[data-slot="dropdown-menu-checkbox-item"],
+[data-slot="dropdown-menu-radio-item"],
+[data-slot="select-item"] {
+  font-size: var(--princeq-control-font);
+  line-height: var(--princeq-control-line);
+  font-weight: 400;
+}
+[data-slot="label"],
+[data-slot="dropdown-menu-label"] { font-size: 12px; line-height: 18px; font-weight: 400; }
+[data-slot="badge"] { font-size: 12px; line-height: 18px; }
+button[data-slot="popover-trigger"],
+button[data-slot="select-trigger"] { font-weight: 400; }
+
+.princeq-app .task-card .task-card-actions button {
+  height: 30px;
+  min-height: 30px;
+  padding: 4px 10px;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 18px;
+}
+.princeq-app .task-card .task-card-actions button:not(.bg-primary) { font-weight: 400; }
+.princeq-app .task-card .task-card-actions button svg { width: 14px; height: 14px; }
+/* One calm metadata row, with wrapping that keeps each fact together. */
+.princeq-app .task-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+}
+.princeq-app .task-card-meta-item { min-width: 0; max-width: 100%; }
+.princeq-app .task-card-meta dd {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+.princeq-app .task-card-meta dd > svg { flex-shrink: 0; width: 13px; height: 13px; }
+.princeq-app .task-card .task-card-meta [data-slot="badge"] {
+  min-height: 22px;
+  padding: 1px 7px;
+  font-size: 12px;
+  line-height: 18px;
+}
+@media (max-width: 640px) {
+  .princeq-app .task-card-meta { column-gap: 14px; }
+}
+
+.princeq-app .activity-filters label { display: block; margin-bottom: 4px; }
+.princeq-app .activity-filters :is(input, select, button[data-slot="popover-trigger"]) {
+  height: 32px;
+  min-height: 32px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+}
+.princeq-app .activity-filters button svg { width: 14px; height: 14px; }
+
+/* Keep touch targets and editable text usable on phones. */
+@media (pointer: coarse) {
+  .princeq-app .task-card .task-card-actions button { height: 40px; min-height: 40px; }
+  .princeq-app .activity-filters :is(input, select, button[data-slot="popover-trigger"]) { height: 40px; min-height: 40px; }
+}
+@media (max-width: 640px) {
+  [data-slot="input"], [data-slot="textarea"],
+  .princeq-app .activity-filters input { font-size: 16px; line-height: 24px; }
+}

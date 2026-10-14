@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.server.tsbuildinfo",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Node runs these files directly via native type stripping, so .ts
+       specifiers must be allowed and nothing is emitted. */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "strict": false,
+    "noImplicitAny": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    /* Node strips types rather than compiling them: reject any syntax that
+       needs a real emit (parameter properties, enums, namespaces). */
+    "erasableSyntaxOnly": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["./shared/*"],
+      /* `tests/` 里有几个纯逻辑测试直接 import `src/` 下的模块（草稿、分组、设置
+         契约等），而那些模块用 `@/` 引同目录的兄弟文件。这个项目 include 了
+         tests，所以这里也得认同一个别名——否则它们在 app 项目里能解析，在
+         server 项目里报 TS2307。 */
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["server", "shared", "tests"]
+}

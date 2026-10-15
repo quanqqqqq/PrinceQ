@@ -4,6 +4,25 @@
 
 PrinceQ 是本地优先的个人工作队列，帮助你安排任务与目标，并用 Claude / Codex 助手处理请求。
 
+## 通过 AI 应用快速安装
+
+打开 Codex、Claude Code、Cursor 等能读取仓库、操作本机文件并执行终端命令的 AI 应用，将下面这段话完整复制给它，即可让 AI 帮你安装并启动 PrinceQ：
+
+```text
+请帮我在这台电脑上安装并启动 PrinceQ：
+https://github.com/quanqqqqq/PrinceQ
+
+请直接执行安装，并按以下步骤完成：
+1. 先检查操作系统、Git 和 Node.js 环境。PrinceQ 需要 Node.js 24.x（含 npm）；缺少依赖时按当前系统安装或切换版本。
+2. 将仓库克隆到当前用户可写的目录，阅读仓库最新的 README；Windows 还需阅读 docs/windows.md。如果已有 PrinceQ，先检查现有安装，保留本地数据与未提交修改。
+3. 在项目目录依次运行 npm ci、npm run db:setup、npm run dev；Windows PowerShell 使用 npm.cmd。
+4. 保持服务运行，检查 http://127.0.0.1:28641/ 返回 HTTP 200，且 http://127.0.0.1:28641/api/health 返回的 status 为 ok。遇到错误请查看日志并排查，通过检查后再报告启动成功。
+5. 打开 http://127.0.0.1:28641/，引导我在「个人设置 → PrinceQ 助手」选择并验证已安装、已登录的 Claude Code 或 Codex CLI；需要我亲自登录时告诉我操作步骤。
+6. 完成后告诉我安装目录、访问地址，以及下次启动和停止的方法。语音和外部 Agent Skill 按需安装，这次先完成基础应用安装。
+```
+
+AI 应用需要获得本机目录和终端的访问权限；仅支持网页聊天的应用可以提供操作指导，实际命令仍需在本机运行。安装完成后，日常使用按下方「日常启动」操作即可。
+
 ## 快速启动
 
 需要 Git 和 **Node.js 24 LTS（含 npm）**。当前服务直接运行 TypeScript，并使用 Node 内置 SQLite，请先用 `node --version` 确认版本为 `v24.x`。使用外部 Agent Skill 客户端时还需要 Python 3。

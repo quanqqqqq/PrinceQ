@@ -7,8 +7,9 @@ import {claimVoiceInput,releaseVoiceInput,onVoiceInputStart} from '@/lib/voice-i
  * 注意：示例指令本身是发给后端解析器的业务值（英文关键词），只给中文说明，
  * 不翻译要发送的指令文本。
  */
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {useAgentConversation} from '@/hooks/use-agent-conversation';
+import {useConversationScroll} from '@/hooks/use-conversation-scroll';
 import {
   ArrowUp,
   Bot,
@@ -29,6 +30,7 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { AgentResultView } from '@/components/AgentResultView';
+import {ConversationMessage,ConversationSystemNotice} from '@/components/ConversationMessage';
 import { AgentSummary } from '@/components/AgentSummary';
 import { SkillDownloadButton } from '@/components/SkillDownloadButton';
 import { WriteError } from '@/components/states';
@@ -40,7 +42,7 @@ import {
   sourceModeForResult,
 } from '@/lib/agent-runtime-contract';
 import { useResource } from '@/hooks/use-resource';
-import { APP_NAME, demoTitle } from '@/lib/i18n';
+import { APP_NAME, demoTitle,translateSystemText } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { checkAgentVoice, synthesizeAgentSpeech, transcribeAgentVoice } from '@/lib/agent-voice-client';
 import { VoiceSilenceDetector } from '@/lib/voice-silence-detector';
@@ -204,32 +206,7 @@ export function AgentPanel({
   const voiceButtonDisabled=Boolean(voiceDisabledReason)&&!voiceCanCancel;
   const voiceActionLabel=recording?'结束录音':voiceBusy||voiceRefining?'断开语音识别':voiceStarting?'取消启动录音':'语音输入';
   const voiceDescription=voiceDisabledReason || voiceStatus;
-  useLayoutEffect(() => {
-    if (!isOpen || historyOpen || sessionLoading) return;
-    const content = conversationRef.current;
-    const viewport = endRef.current?.closest<HTMLDivElement>('[data-slot="scroll-area-viewport"]');
-    if (!content || !viewport) return;
-    // Reopening a mounted panel must reset its saved scroll position. Observe
-    // later layout changes too, including the summaries' character animation.
-    let followingLatest = true;
-    const scrollToLatest = () => {
-      if (followingLatest && viewport.clientHeight > 0) viewport.scrollTop = viewport.scrollHeight;
-    };
-    const onScroll = () => {
-      followingLatest = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4;
-    };
-    scrollToLatest();
-    const frame = requestAnimationFrame(scrollToLatest);
-    const observer = new ResizeObserver(scrollToLatest);
-    observer.observe(viewport);
-    observer.observe(content);
-    viewport.addEventListener('scroll', onScroll, {passive: true});
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
-      viewport.removeEventListener('scroll', onScroll);
-    };
-  }, [isOpen, historyOpen, sessionLoading, sessionId, messages, sending]);
+  const pauseAutoScroll=useConversationScroll(conversationRef,endRef,isOpen&&!historyOpen&&!sessionLoading,sessionId??'new',messages.at(-1)?.id,sending);
   useEffect(()=>{onStatusChange?.({messageCount:messages.length,sending});},[messages.length,sending,onStatusChange]);
   const cancelVoiceInput=useCallback((status='')=>{
     releaseVoiceInput(voiceOwnerRef.current);
@@ -495,8 +472,8 @@ export function AgentPanel({
           {historyLoading ? <p role="status" className="text-xs text-muted-foreground">正在读取历史…</p> : sessions.length===0 ? <p className="py-8 text-center text-sm text-muted-foreground">还没有历史会话，发送消息后会自动保存。</p> : null}
           {nextCursor ? <Button variant="outline" className="w-full" disabled={historyLoading} onClick={()=>void refreshSessions(nextCursor)}>加载更早会话</Button> : null}
         </div>
-      </ScrollArea> : <ScrollArea className="min-h-0 flex-1">
-        <div ref={conversationRef} className="space-y-5 p-4">
+      </ScrollArea> : <ScrollArea className="min-h-0 flex-1 bg-muted/20">
+        <div ref={conversationRef} onClickCapture={event=>{if((event.target as Element).closest('summary'))pauseAutoScroll();}} className="space-y-4 p-4">
           {messages.length === 0 ? (
             <div className="space-y-3">
               <div className="rounded-md border border-border bg-muted/30 p-3">
@@ -554,30 +531,24 @@ export function AgentPanel({
 
           {messages.map((message) =>
             message.role === 'user' ? (
-              <div key={message.id} className="flex justify-end">
-                <div className="max-w-[88%] space-y-1.5">
-                  <p className="px-1 text-right text-[11px] font-medium text-muted-foreground">你</p>
-                  <p className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-primary/15 bg-primary/5 px-4 py-3 text-[14px] leading-6 text-foreground shadow-sm">{message.content}</p>
-                  {message.delivery ? <div className="flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
-                    <span>{message.delivery === 'sending' ? '等待回复…' : message.delivery === 'cancelled' ? '已停止等待' : '未完成，请重新发送'}</span>
+              <ConversationMessage key={message.id} role="user" name="你" status={message.delivery ? <div className="flex items-center gap-2 font-normal">
+                    <span className={message.delivery==='failed'?'text-destructive':undefined}>{message.delivery === 'sending' ? '发送中…' : message.delivery === 'cancelled' ? '已停止等待' : '发送失败，可重试'}</span>
                     {message.delivery !== 'sending' ? <Button size="sm" variant="ghost" className="h-6 px-1 text-xs" disabled={sending}
                       onClick={() => void send(message.content, undefined, undefined, message.id)}>重新发送</Button> : null}
-                  </div> : null}
-                </div>
-              </div>
+                  </div> : null}>
+                <p className="whitespace-pre-wrap break-words">{message.content}</p>
+              </ConversationMessage>
+            ) : message.result?.kind==='applied' ? (
+              <ConversationSystemNotice key={message.id}>
+                <p className="whitespace-pre-wrap break-words">{(message.result.answer??translateSystemText(message.result.headline)).split('\n')[0]}</p>
+                {message.result.answer?.includes('\n')||message.result.blocks.length||message.result.reasoning.length||message.result.summary?.length||message.result.warnings?.length?<details className="mt-1.5"><summary className="cursor-pointer font-medium">查看执行详情</summary><div className="mt-2 space-y-2">{message.result.answer?.includes('\n')?<p className="whitespace-pre-wrap break-words">{message.result.answer}</p>:null}<AgentResultView result={message.result} showHeader={false} onConfirm={(token,drafts)=>void confirm(token,drafts)} onCancel={token=>void cancel(token)} onSend={(text,target)=>void send(text,target)} confirming={confirming} disabledTokens={disabledTokens}/></div></details>:null}
+              </ConversationSystemNotice>
             ) : (
-              <div key={message.id} ref={message.id === pendingPreview?.id ? pendingPreviewRef : undefined} className="flex items-start gap-3">
-                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/15 bg-primary/5 text-primary">
-                  <Bot className="size-4" />
-                </div>
-                <div className="min-w-0 flex-1 space-y-1.5">
-                  <div className="flex flex-wrap items-center gap-2 px-1">
-                    <span className="text-xs font-semibold text-foreground">PrinceQ</span>
+              <ConversationMessage key={message.id} role="assistant" name={`${APP_NAME} 助手`} articleRef={message.id === pendingPreview?.id ? pendingPreviewRef : undefined} metadata={
                     <Badge variant="outline" className="h-5 font-normal text-[10px] text-muted-foreground">
                       {sourceLabel(sourceModeForResult(message.result?.mode, sources[message.id]), message.result?.provider)}
                     </Badge>
-                  </div>
-                  <div className="rounded-2xl rounded-tl-md border border-border/70 bg-card p-4 shadow-sm">
+                  }>
                     {message.result ? (
                       <AgentResultView
                         result={message.result}
@@ -588,20 +559,14 @@ export function AgentPanel({
                         disabledTokens={disabledTokens}
                       />
                     ) : (
-                      <p className="whitespace-pre-wrap break-words text-[14px] leading-6 text-foreground">{message.content}</p>
+                      <p className="whitespace-pre-wrap break-words">{message.content}</p>
                     )}
-                  </div>
-                </div>
-              </div>
+              </ConversationMessage>
             ),
           )}
 
           {sending ? (
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/15 bg-primary/5 text-primary">
-                <Loader2 className="size-4 animate-spin" />
-              </div>
-              <div className="min-w-0 flex-1 rounded-2xl rounded-tl-md border border-border/70 bg-card p-4 shadow-sm">
+            <ConversationMessage role="assistant" name={`${APP_NAME} 助手`} busy>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-foreground">
@@ -646,8 +611,7 @@ export function AgentPanel({
                     ) : null}
                   </>
                 ) : null}
-              </div>
-            </div>
+            </ConversationMessage>
           ) : null}
 
           {failedTurn ? (

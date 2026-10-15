@@ -175,6 +175,7 @@ export function AgentResultView({
   onSend,
   confirming,
   disabledTokens,
+  showHeader = true,
 }: {
   result: AgentResult;
   onConfirm: (token: string, drafts?: DraftOverride[]) => void;
@@ -185,6 +186,8 @@ export function AgentResultView({
   confirming: boolean;
   /** 已经确认或取消过的 token，按钮永久失效，不能再次提交。 */
   disabledTokens: ReadonlySet<string>;
+  /** System notices already show the outcome above their expandable details. */
+  showHeader?: boolean;
 }) {
   const meta = KIND_META[result.kind];
   const Icon = meta.icon;
@@ -193,7 +196,7 @@ export function AgentResultView({
 
   return (
     <div className="space-y-2.5">
-      <div className="flex items-start gap-2">
+      {showHeader ? <div className="flex items-start gap-2">
         <Icon className={cn('mt-0.5 size-4 shrink-0', meta.className)} />
         <div className="min-w-0 flex-1">
           <p className="whitespace-pre-wrap break-words text-[14px] leading-7 text-foreground">
@@ -210,7 +213,7 @@ export function AgentResultView({
             ) : null}
           </div>
         </div>
-      </div>
+      </div> : null}
 
       <AgentWarnings warnings={result.warnings} />
 

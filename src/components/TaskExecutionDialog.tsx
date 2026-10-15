@@ -1,11 +1,12 @@
 import {TaskSkillPreviewCard} from '@/components/TaskSkillPreviewCard';
+import {ConversationMessage,ConversationSystemNotice} from '@/components/ConversationMessage';
 import {useConversationScroll} from '@/hooks/use-conversation-scroll';
 import type {TaskAssistanceSession,TaskSkillPreview,TaskAssistanceDetail} from '@shared/task-assistance';
 import {mergeTaskAssistanceMessages,mergeTaskSkillPreviews,shouldSendTaskMessage,type TaskChatMessage} from '@/lib/task-assistance-messages';
 import {useVoiceInput} from '@/hooks/use-voice-input';
 import type {AgentProgressView} from '@shared/types';
 import {useEffect,useRef,useState} from 'react';
-import {Sparkles,Repeat2,Send,Check,CalendarDays,Mic,Loader2,UserRound,Info} from 'lucide-react';
+import {Sparkles,Repeat2,Send,Check,CalendarDays,Mic,Loader2} from 'lucide-react';
 import type {Task} from '@shared/types';
 import {calendarDate,occurrenceLabels,recurrenceUnitLabels,localMinute,type RecurrenceUnit} from '@shared/recurrence';
 import {api} from '@/lib/api';
@@ -183,13 +184,7 @@ export function TaskAssistant({task,active,onOpenTask}:{task:Task;active:boolean
     <p className="text-xs leading-5 text-muted-foreground">此对话只协助当前任务，可随时关闭后继续。AI 会整理产出；由你验收后完成任务{task.recurrence?'的本次执行':''}。</p>
     <p className="text-xs text-primary">PrinceQ Skill 已接入 · 任务修改先预览，确认后执行</p>
     {history.error?<p className="text-xs text-destructive">{history.error}</p>:null}
-    {messages.map(message=>message.operation_result?<article key={message.id} aria-label="系统通知" data-message-role="system" className="mx-auto flex w-fit max-w-full items-start gap-2 rounded-lg border border-dashed bg-muted/50 px-3 py-2 text-xs leading-5 text-muted-foreground">
-      <Info aria-hidden="true" className="mt-0.5 size-3.5 shrink-0"/><div><p className="font-medium">系统通知</p><p className="whitespace-pre-wrap break-words">{message.content}</p></div>
-    </article>:<article key={message.id} aria-label={message.role==='user'?'你发送的消息':'任务 Agent 的回复'} data-message-role={message.role} className={`flex items-start gap-2 ${message.role==='user'?'flex-row-reverse':'flex-row'}`}>
-      <div aria-hidden="true" className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full ${message.role==='user'?'bg-primary text-primary-foreground':'border border-primary/15 bg-primary/10 text-primary'}`}>{message.role==='user'?<UserRound className="size-3.5"/>:<Sparkles className="size-3.5"/>}</div>
-      <div className={`min-w-0 ${message.role==='user'?'max-w-[85%]':'flex-1'}`}>
-      <p className={`mb-1.5 flex items-center gap-2 text-xs font-medium text-muted-foreground ${message.role==='user'?'justify-end':''}`}><span>{message.role==='user'?'你':'任务 Agent'}</span>{message.delivery?<span className={message.delivery==='failed'?'text-destructive':'font-normal'}>{message.delivery==='sending'?'发送中…':'发送失败，可重试'}</span>:null}</p>
-      <div className={`rounded-2xl px-3 py-2.5 text-sm leading-6 shadow-sm ${message.role==='user'?'rounded-tr-sm bg-primary text-primary-foreground':'rounded-tl-sm border bg-card'}`}>
+    {messages.map(message=>message.operation_result?<ConversationSystemNotice key={message.id}><p className="whitespace-pre-wrap break-words">{message.content}</p></ConversationSystemNotice>:<ConversationMessage key={message.id} role={message.role} name={message.role==='user'?'你':'任务 Agent'} status={message.delivery?<span className={message.delivery==='failed'?'text-destructive':'font-normal'}>{message.delivery==='sending'?'发送中…':'发送失败，可重试'}</span>:null}>
       {message.summary?.length?<details open className="mb-2 rounded-md border border-primary/15 bg-primary/5 p-2 text-xs leading-5"><summary className="cursor-pointer font-medium text-primary">处理摘要</summary><ul className="mt-1 list-disc space-y-1 pl-4">{message.summary.map((item,index)=><li key={index}>{item}</li>)}</ul></details>:null}
       <div className="task-assistant-markdown break-words">{message.role==='user'?<p className="whitespace-pre-wrap">{message.content}</p>:<ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>}</div>
       {message.preview_token?previews.filter(preview=>preview.token===message.preview_token).map(preview=><TaskSkillPreviewCard key={preview.token} preview={preview} busy={requestBusy} processing={mutation.pending?.endsWith(preview.token)?mutation.pending.split(':')[0]:null} onConfirm={()=>void resolvePreview(preview.token,'confirm')} onCancel={()=>void resolvePreview(preview.token,'cancel')} onEdit={()=>editDraft('请调整这份修改预览，新的要求是：')} onOpenTask={id=>onOpenTask?.(id)}/>):null}
@@ -199,12 +194,12 @@ export function TaskAssistant({task,active,onOpenTask}:{task:Task;active:boolean
       <p className="text-xs text-muted-foreground">{session.accepted_at?'已采纳并完成。':session.ready?'请核对产出与实际事实，可继续对话修改。':'尚有信息或执行证据待补齐，请继续对话。'}</p>
       {session.ready&&!session.accepted_at?<Button size="sm" disabled={requestBusy||!!mutation.pending||task.status==='completed'||task.status==='archived'} onClick={()=>mutation.run('accept',()=>api.acceptTaskAssistance(task.id,session.revision,task.version))}><Check/>{task.recurrence?'采纳产出并完成本次':'采纳产出并完成任务'}</Button>:null}
     </details>:null}
-    </div></div></article>)}
-    {responseBusy?<section role="status" aria-live="polite" className="space-y-2 rounded-md border border-primary/20 bg-primary/5 p-3 text-xs leading-5">
+    </ConversationMessage>)}
+    {responseBusy?<ConversationMessage role="assistant" name="任务 Agent" busy><section role="status" aria-live="polite" className="space-y-2 text-xs leading-5">
       <p className="flex items-center gap-2 font-medium text-primary"><Loader2 className="size-3 animate-spin"/>{observedProgress?.message??'Agent 正在处理当前任务…'}</p>
       <ol className="flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">{['整理任务资料','调用 Agent','接收处理摘要','校验协助产出'].map((label,index)=>{const current=({checking:-1,context:0,calling:1,response:2,validation:3,complete:4,failed:-1} as Record<string,number>)[observedProgress?.phase??'checking'];return <li key={label} className={index===current?'font-medium text-primary':''}>{index<current?'✓ ':''}{label}</li>;})}</ol>
       {observedProgress?.summary_text?<p className="whitespace-pre-wrap text-foreground">{observedProgress.summary_text}</p>:null}
-    </section>:null}
+    </section></ConversationMessage>:null}
     <div ref={endRef}/>
     </div></ScrollArea>
     <div className="shrink-0 space-y-2 border-t border-border p-4">

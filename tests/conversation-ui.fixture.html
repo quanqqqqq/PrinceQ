@@ -1,0 +1,42 @@
+<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><title>两个对话模块 UI 一致性验收</title>
+<style>body{margin:0}.fixture-panes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;padding:12px}.fixture-pane{height:calc(100dvh - 86px);min-height:540px;display:flex;flex-direction:column;min-width:0;border:1px solid #ddd}.fixture-title{padding:8px 16px;border-bottom:1px solid #ddd;font-size:14px;font-weight:600}@media(max-width:760px){.fixture-panes{grid-template-columns:minmax(0,1fr)}}</style>
+<body><header style="padding:8px 12px;display:flex;gap:12px;flex-wrap:wrap"><strong>隔离 UI 验收：模拟会话，不修改真实任务</strong><button id="basic">消息来源</button><button id="long">长回复</button><button id="preview">修改预览</button><button id="reply">返回回复</button><button id="failure">返回失败</button><span id="report"></span></header><div id="root"></div>
+<script type="module">
+import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
+import {TaskAssistant} from '../src/components/TaskExecutionDialog.tsx';import {AgentPanel} from '../src/components/AgentPanel.tsx';
+import {WorkspaceProvider} from '../src/hooks/use-workspace.tsx';import {AgentConversationProvider} from '../src/hooks/agent-conversation-provider.tsx';import '../src/index.css';
+const storage=new Map();Object.defineProperty(window,'localStorage',{value:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value)}});
+const at=()=>new Date().toISOString(),json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json'}});
+const session={id:'ui-session',title:'30天健身计划 · 模拟会话',created_at:at(),updated_at:at(),message_count:3};
+const result=(answer,kind='answer',extra={})=>({kind,headline:answer,answer,reasoning:[],blocks:[],pending_action:null,matched_command:null,mode:'deterministic-local',...extra});
+const message=(role,content,extra={})=>({id:crypto.randomUUID(),session_id:session.id,role,content,result:null,created_at:at(),...extra});
+let taskMessages=[],agentMessages=[],pending=[],count=0;
+const notice='已取消这份预览，没有修改任务或循环计划。';
+function seed(mode){
+ const text=mode==='long'?'请帮我核对这份30天计划。\n'+('核对资料与计划，保留已有记录。'.repeat(24))+'\nhttps://example.com/'+('fitness-plan-'.repeat(24)):'请帮我梳理30天健身计划的任务。';
+ const reply=mode==='long'?'以下是待确认的计划资料。\n\n'+('先核对已有信息，再预览修改并等待确认。'.repeat(40)):'我会先整理已有资料，再预览任务或循环计划的修改，等你确认后执行。';
+ taskMessages=[message('user',text),message('assistant',reply),message('assistant',notice,{operation_result:true})];
+ agentMessages=[message('user',text),message('agent',reply,{result:result(reply)}),message('agent',notice,{result:result(notice,'applied',{blocks:[{type:'list',title:'执行结果',items:['原有任务与循环计划保持不变。']}]})})];
+ if(mode==='preview')agentMessages=[message('user','请先预览：新增每周回顾任务。'),message('agent','请核对后确认，当前尚未执行。',{result:result('请核对后确认，当前尚未执行。','preview',{pending_action:{token:'ui-preview',command:'create_task',summary:'新建“每周回顾训练与恢复记录”，每周一次。',affected_task_ids:[]}})})];
+ storage.delete('pwq.agent-panel.v1');pending=[];document.querySelector('#report').textContent='已发送 '+count+' 条；真实写入 0';
+}
+seed('basic');
+window.fetch=async(url,options={})=>{
+ const path=String(url);
+ if(path.endsWith('/voice/status'))return json({backend:'fixture',asr:{available:false,reason:'此验收页不访问麦克风'},tts:{available:false,reason:'此验收页不合成语音'}});
+ if(path.endsWith('/agent/runtime-status'))return json({configured:false,enabled:false,provider:null,health:{ok:false,reason:'health_unknown',checked_at:null},effective_mode:'deterministic-local',background:{implemented:false,status:'not_implemented'}});
+ if(path.endsWith('/agent/sessions'))return json({sessions:[session],next_cursor:null});
+ if(path.endsWith('/agent/sessions/'+session.id))return json({session,messages:agentMessages,disabled_tokens:[]});
+ if(path.endsWith('/queue'))return json({entries:[]});
+ if(path.endsWith('/agent/message')||path.endsWith('/tasks/ui-task/assistance/messages'))return new Promise(resolve=>{const body=JSON.parse(options.body);pending.push({resolve,task:path.includes('/tasks/'),text:body.message,key:options.headers?.['Idempotency-Key']});count++;document.querySelector('#report').textContent='已发送 '+count+' 条；真实写入 0';});
+ if(path.includes('/assistance/progress/'))return json(null);
+ if(path.endsWith('/tasks/ui-task/assistance'))return json({session:null,messages:taskMessages,busy:pending.some(item=>item.task)});
+ if(path.endsWith('/agent/confirm')||path.endsWith('/agent/preview/confirm')){const applied=result('已确认：模拟创建每周回顾任务，真实数据未修改。','applied',{blocks:[{type:'list',title:'模拟执行结果',items:['新建每周回顾任务，每周一次。']}]});const messages=[message('user','确认了预览。'),message('agent',applied.answer,{result:applied})];agentMessages.push(...messages);return json({session,messages,result:applied,invalidates:[]});}
+ throw new Error('Unexpected UI fixture request: '+path);
+};
+document.querySelector('#reply').onclick=()=>{for(const item of pending.splice(0)){if(item.task){taskMessages.push(message('user',item.text,{request_key:item.key}),message('assistant','收到，我会先给出修改预览。'));item.resolve(json({session:null,messages:taskMessages,busy:false}));}else{const reply=result('收到，我会先给出修改预览。');const messages=[message('user',item.text),message('agent',reply.answer,{result:reply})];agentMessages.push(...messages);item.resolve(json({session,messages,result:reply,invalidates:[]}));}}};
+document.querySelector('#failure').onclick=()=>{for(const item of pending.splice(0))item.resolve(json({error:{code:'unavailable',message:'模拟请求失败，请重试。'}},503));};
+const task={id:'ui-task',title:'整理训练起点与健康限制',description:'隔离 UI 验收',version:1,status:'inbox',recurrence:null};
+function App(){const [revision,setRevision]=useState(0);for(const mode of ['basic','long','preview'])document.querySelector('#'+mode).onclick=()=>{seed(mode);setRevision(value=>value+1);};return React.createElement(WorkspaceProvider,null,React.createElement(AgentConversationProvider,{key:revision},React.createElement('main',{className:'fixture-panes'},React.createElement('section',{className:'fixture-pane','aria-label':'任务 AI 协助验收'},React.createElement('h2',{className:'fixture-title'},'任务 AI 协助 · 健身计划'),React.createElement(TaskAssistant,{task,active:true})),React.createElement('section',{className:'fixture-pane','aria-label':'Agent 助手验收'},React.createElement(AgentPanel)))));}
+createRoot(document.querySelector('#root')).render(React.createElement(App));
+</script></body></html>

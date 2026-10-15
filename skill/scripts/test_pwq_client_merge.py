@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 import importlib.util
 import io
+import os
 import json
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[2]
-INSTALLED=Path("/Users/yeqiquan/Library/Application Support/DoubaoWork/Default/.doubaowork/agent_mode/workspace/.user_skills/personal-work-queue/scripts/pwq_client.py")
+INSTALLED=Path(os.environ['PWQ_INSTALLED_CLIENT']) if os.environ.get('PWQ_INSTALLED_CLIENT') else None
 
 class ClientMergeTests(unittest.TestCase):
     def setUp(self):
@@ -20,12 +21,16 @@ class ClientMergeTests(unittest.TestCase):
             if method=="GET" and path.startswith("/api/tasks/"): return {"task":{"version":7}}
             return {"ok":True}
         self.client.request=request
+        # Isolate argument/body mapping; current preview transport has its own tests.
+        self.client.submit_or_control=lambda args,method,path,body,key:self.client.request(args.base,method,path,body=body,key=key)
     def run_cli(self,*args):
         with redirect_stdout(io.StringIO()),redirect_stderr(io.StringIO()):
             self.client.main(list(args))
     def write_call(self):
         return [call for call in self.calls if call[0]!="GET"][-1]
     def test_both_installed_and_repository_client_are_identical(self):
+        if INSTALLED is None:
+            self.skipTest("Set PWQ_INSTALLED_CLIENT to compare a separately installed client")
         self.assertEqual((ROOT/"skill/scripts/pwq_client.py").read_bytes(),INSTALLED.read_bytes())
     def test_score_decimals_reads_and_submits_expected_version(self):
         self.run_cli("score-task","task/one","--importance-score","72.5","--urgency-score","40","--reason","明确目标影响，无紧迫截止压力")
@@ -63,7 +68,7 @@ class ClientMergeTests(unittest.TestCase):
         self.run_cli("rescoring","submit","--id","r/1","--urgency-score","35.5","--reason","截止压力解除，重要程度不变","--agent-name","当前助手")
         self.assertEqual(self.write_call()[1],"/api/rescoring-requests/r%2F1/submit")
         self.assertNotIn("importance_score",self.write_call()[2])
-        self.calls.clear();self.run_cli("agent-preview","confirm","pa_123","--session-id","session_1")
+        self.calls.clear();self.run_cli("agent-preview","confirm","pa_123","--session-id","session_1","--confirmed")
         self.assertEqual(self.write_call()[1],"/api/agent/preview/confirm")
         self.assertEqual(self.write_call()[2],{"token":"pa_123","session_id":"session_1"})
     def test_settings_map_survives_client_filtering(self):

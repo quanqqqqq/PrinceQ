@@ -8,7 +8,9 @@ PrinceQ 是本地优先的个人工作队列，帮助你安排任务与目标，
 
 需要 Git 和 **Node.js 24 LTS（含 npm）**。当前服务直接运行 TypeScript，并使用 Node 内置 SQLite，请先用 `node --version` 确认版本为 `v24.x`。使用外部 Agent Skill 客户端时还需要 Python 3。
 
-如果已安装 nvm，可以先切换 Node 版本：
+Windows 原生安装、语音配置与验收边界见 [Windows 使用说明](docs/windows.md)。也可双击 `Start-PrinceQ.cmd` 启动；PowerShell 下使用 `npm.cmd` 可避免 `npm.ps1` 执行策略限制。
+
+macOS / Linux 如果已安装 nvm，可以先切换 Node 版本：
 
 ```sh
 nvm install 24
@@ -74,7 +76,7 @@ curl http://127.0.0.1:28641/api/health
 
 在右侧「助手」下方点击下载图标，或展开助手后点击底部「下载 PrinceQ Skill」，即可下载供其他 Agent 安装的 ZIP。每次下载都从当前仓库的 `skill/` 目录即时打包；安装说明随包附在 `INSTALL.md`。在已克隆仓库的电脑上，也可直接运行 `python3 skill/scripts/install_skill.py`。
 
-助手支持本地 Qwen 语音输入和语音朗读：语音先由 Qwen3-ASR 转成文字，再走当前 PrinceQ Agent 对话链路；助手回复可由 Qwen3-TTS 合成。Apple Silicon 首次使用需要本机 MLX 环境和模型权重；已有 `Jev/.voice-venv` 时会自动复用，否则运行 `npm run voice:setup`。语音模型权重在首次使用时下载到本机缓存，推理不调用云端语音 API。
+助手支持本地 Qwen 语音输入和语音朗读：识别结果先进入可编辑输入框，手动发送后走当前 Agent 对话；回复可由 Qwen3-TTS 合成。Apple Silicon 默认使用 MLX，Windows x64 / 其他平台使用独立的 PyTorch ASR、TTS 环境。运行 `npm run voice:setup` 安装；首次使用下载模型权重，推理在本机进行。依赖检测通过不等于真实推理验收通过，硬件要求与配置见 [Windows 使用说明](docs/windows.md#本地语音)。
 
 ## 核心能力与操作截图
 
@@ -124,7 +126,7 @@ curl http://127.0.0.1:28641/api/health
 ### 5. 任务分布视图：从重要和紧急两个维度看任务
 
 横轴为紧急程度，纵轴为重要程度。散点图和四象限列表帮助你查看任务分布，点击任务可展开信息和操作。
-在 Mac 上，按住 Command 再滚动鼠标滚轮可按指针位置缩放；也支持图上的放大、缩小与重置按钮。
+在 Mac 上按住 Command、Windows 上按住 Alt，再滚动鼠标滚轮可按指针位置缩放；也支持图上的放大、缩小与重置按钮。
 
 ![任务分布散点图和象限](docs/screenshots/task-distribution.jpg)
 

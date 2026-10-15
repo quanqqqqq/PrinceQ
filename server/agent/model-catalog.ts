@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {resolveCliLaunch, terminateProcessTree, trackRuntimeProcess} from '../lib/process-launch.ts';
 import {spawn} from 'node:child_process';
 import {StringDecoder} from 'node:string_decoder';
 import {runCli,buildCliEnv} from './cli-exec.ts';
@@ -36,14 +37,17 @@ function configArgs(args:string[]):string[] {
 }
 export function readCodexModelRpc(cfg:AgentRuntimeConfig):Promise<ModelChoice[]> {
   return new Promise((resolve,reject)=>{
-    const child=spawn(cfg.cli_path,['app-server','--listen','stdio://',...configArgs(cfg.args),'--config','features.apps=false','--config','mcp_servers={}','--config','plugins={}'],{shell:false,cwd:cfg.working_directory,env:buildCliEnv(cfg.allowed_env_names,'codex'),stdio:['pipe','pipe','ignore']});
+    let launch;
+    try {launch=resolveCliLaunch(cfg.cli_path,['app-server','--listen','stdio://',...configArgs(cfg.args),'--config','features.apps=false','--config','mcp_servers={}','--config','plugins={}']);}
+    catch(error){reject(error);return;}
+    const child=trackRuntimeProcess(spawn(launch.executable,launch.args,{detached:process.platform!=='win32',windowsHide:true,shell:false,cwd:cfg.working_directory,env:buildCliEnv(cfg.allowed_env_names,'codex'),stdio:['pipe','pipe','ignore']}));
     const decoder=new StringDecoder('utf8');
     let finished=false,buffer='',bytes=0,id=2,pages=0;const entries:unknown[]=[];
     const timer=setTimeout(()=>finish(new Error('model_catalog_timeout')),12000);
     let killer:NodeJS.Timeout|undefined;
     function finish(error?:Error) {
       if(finished)return;finished=true;clearTimeout(timer);
-      child.stdin.end();child.kill('SIGTERM');killer=setTimeout(()=>child.kill('SIGKILL'),1500);killer.unref();
+      child.stdin.end();terminateProcessTree(child,'SIGTERM');killer=setTimeout(()=>terminateProcessTree(child,'SIGKILL'),1500);killer.unref();
       if(error)reject(error);else resolve(normalizeCodexModels(entries));
     }
     const send=(message:unknown)=>{if(!finished)child.stdin.write(JSON.stringify(message)+'\n');};

@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -264,8 +265,7 @@ test('runtime changes during a call cannot apply the old result',async()=>{
   assert.equal(readHabitFile('inferred').payload.entries.length,0);
 });
 test('CLI timeout removes its private instruction file and never stores an observation',async(t)=>{
-  const executable=path.join(root,'timeout.sh');
-  fs.writeFileSync(executable,'#!/bin/sh\ncat >/dev/null\nsleep 2\necho "{}"\n',{mode:0o755});
+  const executable=nodeCli(path.join(root,'timeout'), 'setTimeout(()=>console.log("{}"),2000);');
   const original=fs.mkdtempSync.bind(fs);
   let instructionDirectory='';
   t.mock.method(fs,'mkdtempSync',((prefix:string,options?:any)=>{
@@ -281,8 +281,7 @@ test('CLI timeout removes its private instruction file and never stores an obser
 });
 
 test('real CLI adapter rejects unstructured replies without touching habits',async()=>{
-  const executable=path.join(root,'malformed.sh');
-  fs.writeFileSync(executable,'#!/bin/sh\ncat >/dev/null\necho malformed-output\n',{mode:0o755});
+  const executable=nodeCli(path.join(root,'malformed'), 'console.log("malformed-output");');
   const before=inferredBytes();
   await assert.rejects(()=>requestHabitObservations({...cfg,cli_path:executable},usual(),new AbortController().signal),/invalid_reply/);
   assert.equal(inferredBytes(),before);

@@ -38,6 +38,11 @@ import urllib.parse
 import urllib.request
 import uuid
 
+# Pipes on Windows otherwise inherit the legacy console code page.
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8')
+
 DEFAULT_BASE = os.environ.get("PWQ_API_BASE", "http://127.0.0.1:28642")
 TIMEOUT = float(os.environ.get("PWQ_API_TIMEOUT", "130"))
 

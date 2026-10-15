@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 /** Regression for embedded creation replies wrapped in skill_operation's payload envelope. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,8 +30,7 @@ const wrapped = {action: combinedAction, payload: combinedPayload};
 function reply(actions: unknown) {return JSON.stringify({answer: '尚未创建，请确认预览。', proposed_actions: actions});}
 let sequence = 0;
 async function generate(db: ReturnType<typeof freshDb>, actions: unknown) {
-  const cli = path.join(temporary, `fake-${++sequence}.sh`);
-  fs.writeFileSync(cli, `#!/bin/sh\ncat >/dev/null\ncat <<'REPLY'\n${reply(actions)}\nREPLY\n`, {mode: 0o755});
+  const cli = nodeCli(path.join(temporary, `fake-${++sequence}`), `console.log(${JSON.stringify(reply(actions))});`);
   return runAgentMessage({db, message: '帮我创建目标及任务', actorId: 'actor-human-me', idempotencyKey: `message-${sequence}`},
     {...defaultRuntimeConfig(), enabled: true, cli_path: cli});
 }

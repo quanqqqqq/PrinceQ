@@ -54,3 +54,10 @@ test('cancellation also releases a stalled response body',{timeout:1000},async t
   const rejected=assert.rejects(result,{name:'AbortError'});
   await bodyStarted;controller.abort();await rejected;
 });
+
+test('dependency check prevents recording when local voice is unavailable',async t=>{
+  const {checkAgentVoice}=await import('../src/lib/agent-voice-client.ts');
+  t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({asr:{available:false,reason:'请安装语音环境'},tts:{available:true,reason:null}}),{status:200}));
+  await assert.rejects(checkAgentVoice('asr'),/请安装语音环境/);
+  await checkAgentVoice('tts');
+});

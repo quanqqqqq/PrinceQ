@@ -12,16 +12,16 @@
  *    不跑模型、不碰网络、不产生任何计费调用；也**不跑 `auth` / `login` / `status`
  *    子命令**——那类命令会联网、可能改动 CLI 自己的登录态。所以 `auth_status` 恒为
  *    `'unknown'`：不知道就说不知道，不猜。
- * 3. **不读 token，env 只给 `PATH`。** 不打开任何凭据文件，探针子进程拿到的环境变量
- *    只有 `PATH` 一个名字（走 `runCli` 的 env 白名单），所以 `ANTHROPIC_API_KEY` 之类
+ * 3. **不读 token，环境变量使用白名单。** 不打开任何凭据文件，探针子进程只继承
+ *    系统基础变量（走 `runCli` 的 env 白名单），所以 `ANTHROPIC_API_KEY` 之类
  *    既不会被读、也不会被转发给被探测的二进制。
  * 4. **不走 shell、不递归扫盘。** 候选路径是「固定目录 × 固定 basename」拼出来的，
  *    `spawn(..., { shell: false })` 让任何含 `;`、`$(...)` 的**文件名**都只是字面名字。
  */
-import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ROOT_DIR } from '../config.ts';
+import {executableFile} from '../lib/process-launch.ts';
 import { runCli } from './cli-exec.ts';
 import { nowIso } from '../lib/ids.ts';
 
@@ -109,14 +109,14 @@ const PROVIDERS: DetectProvider[] = ['claude', 'codex'];
 
 /** 每个 provider 的可执行文件名。固定字面量——不接受外部传入的 basename。 */
 const BASENAMES: Record<DetectProvider, string[]> = {
-  claude: ['claude'],
-  codex: ['codex'],
+  claude: process.platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude'],
+  codex: process.platform === 'win32' ? ['codex.exe', 'codex.cmd'] : ['codex'],
 };
 
 const NOTE =
   '本地只读检测：每个候选只执行 --version 与 --help（后者仅用于读 help 文本做能力探测，' +
   '不调用模型、不联网、不产生计费调用），不走 shell、不读取 token/密钥文件，' +
-  '子进程环境变量只含 PATH；不执行 auth/login/status 命令，所以 auth_status 恒为 unknown。' +
+  '子进程只继承系统基础变量与显式允许的变量；不执行 auth/login/status 命令，所以 auth_status 恒为 unknown。' +
   '检测结果默认不写回配置（persist=true 时才写，且 manual 字段不被覆盖）。';
 
 /**
@@ -128,8 +128,10 @@ const NOTE =
 function whitelistDirs(): string[] {
   return [
     path.join(os.homedir(), '.local', 'bin'),
-    '/usr/local/bin',
-    '/opt/homebrew/bin',
+    ...(process.platform === 'win32'
+      ? [process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : '',
+          process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links') : ''].filter(Boolean)
+      : ['/usr/local/bin', '/opt/homebrew/bin']),
     path.join(ROOT_DIR, 'node_modules', '.bin'),
   ];
 }
@@ -152,8 +154,9 @@ function searchDirs(): string[] {
     // 相对的 PATH 条目（历史上的 "." 之类）直接丢弃：它的含义随 cwd 漂移。
     if (!path.isAbsolute(dir)) continue;
     const resolved = path.resolve(dir);
-    if (seen.has(resolved)) continue;
-    seen.add(resolved);
+    const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
     ordered.push(resolved);
   }
   return ordered;
@@ -162,19 +165,7 @@ function searchDirs(): string[] {
 /**
  * 这个路径现在是不是一个可执行的普通文件。不 spawn、不跟随到目录。
  */
-function isExecutableFile(full: string): boolean {
-  try {
-    if (!fs.statSync(full).isFile()) return false;
-  } catch {
-    return false;
-  }
-  try {
-    fs.accessSync(full, fs.constants.X_OK);
-  } catch {
-    return false;
-  }
-  return true;
-}
+const isExecutableFile = executableFile;
 
 /**
  * `--output-format` 行里要剔掉的噪声词。

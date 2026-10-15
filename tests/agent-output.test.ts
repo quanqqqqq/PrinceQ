@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -80,27 +81,26 @@ const { defaultRuntimeConfig } = await import('../server/agent/runtime-config.ts
 const { runConnectionTest, runAgentMessage, AgentRuntimeError } = await import('../server/agent/llm-adapter.ts');
 let n = 0;
 function fake(script: string) {
-  const file = path.join(tmp, 'fake-' + (++n) + '.sh');
-  fs.writeFileSync(file, '#!/bin/sh\n' + script + '\n', {mode:0o755});
+  const file = nodeCli(path.join(tmp, 'cli-' + (++n)), script);
   return { ...defaultRuntimeConfig(), enabled:true, cli_path:file };
 }
 test('真实spawn路径：有回答的非零退出连接成功并给warning', async () => {
-  const r = await runConnectionTest(fake("echo OK; echo '[claude-code:unrecognized_model]' >&2; exit 2"));
+  const r = await runConnectionTest(fake("console.log('OK'); console.error('[claude-code:unrecognized_model]'); process.exitCode=2;"));
   assert.equal(r.ok,true);
   assert.equal(r.status,'success_with_warning');
   assert.equal(r.stdout_excerpt,'OK');
 });
 test('真实spawn路径：超时即使已打印OK仍失败', async () => {
-  const r = await runConnectionTest({...fake('echo OK; sleep 1'),timeout_ms:50});
+  const r = await runConnectionTest({...fake("console.log('OK'); setTimeout(()=>{},1000);"),timeout_ms:50});
   assert.equal(r.ok,false);
   assert.equal(r.reason,'timeout');
 });
 test('真实spawn路径：空答案不返回成功；会话结果保留200字以外正文', async () => {
   const db = freshDb();
   const req = {db,message:'只回答',actorId:'actor-human-me',idempotencyKey:'output-test'};
-  await assert.rejects(runAgentMessage(req,fake('exit 0')), (e: unknown) => e instanceof AgentRuntimeError && e.kind==='no_answer');
+  await assert.rejects(runAgentMessage(req,fake('process.exit(0);')), (e: unknown) => e instanceof AgentRuntimeError && e.kind==='no_answer');
   const body = '完整回答'.repeat(100);
-  const r = await runAgentMessage(req,fake("printf '%s' '"+body+"'"));
+  const r = await runAgentMessage(req,fake("process.stdout.write("+JSON.stringify(body)+");"));
   assert.equal(r.result.answer, body);
   assert.equal(r.result.headline.length,200);
   db.close();

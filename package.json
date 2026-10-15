@@ -9,17 +9,23 @@
     "dev:web": "vite",
     "dev:api": "node --disable-warning=ExperimentalWarning --watch server/index.ts",
     "db:setup": "node --disable-warning=ExperimentalWarning server/db/migrate.ts",
-    "voice:setup": "sh scripts/setup-qwen-voice.sh",
+    "voice:setup": "node scripts/setup-qwen-voice.mjs",
     "setup": "npm install && npm run db:setup",
     "build": "vite build",
-    "test": "node --disable-warning=ExperimentalWarning --test \"tests/**/*.test.ts\"",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=2 \"tests/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.app.json",
     "typecheck:server": "tsc -p tsconfig.server.json",
     "lint": "concurrently npm:typecheck npm:typecheck:server npm:lint:eslint",
     "lint:eslint": "eslint src server shared tests",
     "test:skills:conversation": "node --disable-warning=ExperimentalWarning scripts/skill-conversation-scenario.ts",
     "test:habits:live": "node --disable-warning=ExperimentalWarning scripts/habit-inference-live-scenario.ts",
-    "test:agent:goal-drafts": "node --disable-warning=ExperimentalWarning scripts/goal-decomposition-eval.ts"
+    "test:agent:goal-drafts": "node --disable-warning=ExperimentalWarning scripts/goal-decomposition-eval.ts",
+    "voice:check": "node scripts/setup-qwen-voice.mjs --check",
+    "preinstall": "node scripts/check-node.mjs",
+    "predev": "node scripts/check-node.mjs",
+    "prebuild": "node scripts/check-node.mjs",
+    "pretest": "node scripts/check-node.mjs",
+    "predb:setup": "node scripts/check-node.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "5.4.0",
@@ -96,5 +102,8 @@
     "typescript": "~5.9",
     "typescript-eslint": "^8",
     "vite": "^8"
+  },
+  "engines": {
+    "node": ">=24 <25"
   }
 }

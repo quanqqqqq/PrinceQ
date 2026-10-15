@@ -1,3 +1,4 @@
+import {discoverableCli} from './fixtures/cli.ts';
 /**
  * 本地 CLI 自动检测的隔离测试。
  *
@@ -6,7 +7,7 @@
  * `habits/`、真实的 `config/agent-runtime.json` 一个字节都不会被写。
  *
  * **绝不调用真实的 `claude` / `codex`**（只有最后一个用例是例外，且只跑 `--version`）：
- * 每个用例自己写 shell 脚本当假 CLI，装成「正常回答」「超时」「输出乱码」。这样跑的是
+ * 每个用例自己写 Node 脚本当假 CLI，装成「正常回答」「超时」「输出乱码」。这样跑的是
  * 真实的 spawn 路径（argv 传递、环境白名单、超时终止都是真的），又完全离线、可重复。
  *
  * 最该守住的几条：**检测只跑 `--version`**（假 CLI 把自己收到的 argv 记在文件里，用例
@@ -85,6 +86,7 @@ function withEnv(opts: { pathDirs?: string[]; extraEnv?: Record<string, string> 
 
   const saved = { ...process.env };
   process.env.HOME = path.join(dir, 'home');
+  if(process.platform==='win32'){process.env.USERPROFILE=process.env.HOME;process.env.APPDATA=path.join(dir,'appdata');process.env.LOCALAPPDATA=path.join(dir,'localappdata');}
   // PATH 不能真的空：`runCli` 的 buildEnv 在 PATH 缺失时会兜底成 /usr/bin:/bin。给一个
   // 存在但空无一物的目录，才是真正「PATH 上什么都没有」。
   process.env.PATH = (opts.pathDirs ?? [path.join(dir, 'empty')]).join(path.delimiter);
@@ -120,21 +122,13 @@ function fakeCli(
   body: string,
 ): { file: string; log: string } {
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, name);
-  const log = `${file}.argv.log`;
-  fs.writeFileSync(
-    file,
-    [
-      '#!/bin/sh',
-      `echo "ARGV:$*" >> "${log}"`,
-      // 敏感变量的可见性如实记一笔：空 = 子进程确实没拿到。
-      `echo "ANTHROPIC_API_KEY:\${ANTHROPIC_API_KEY-}" >> "${log}"`,
-      `echo "OPENAI_API_KEY:\${OPENAI_API_KEY-}" >> "${log}"`,
-      `echo "PATH_SEEN:\${PATH-}" >> "${log}"`,
-      body,
-    ].join('\n'),
-    { mode: 0o755 },
-  );
+  const log = path.join(dir, name + '.argv.log');
+  const file = discoverableCli(dir, name, `const fs=require('node:fs');
+fs.appendFileSync(${JSON.stringify(log)}, 'ARGV:'+process.argv.slice(2).join(' ')+'\\n'+
+'ANTHROPIC_API_KEY:'+(process.env.ANTHROPIC_API_KEY??'')+'\\n'+
+'OPENAI_API_KEY:'+(process.env.OPENAI_API_KEY??'')+'\\n'+
+'PATH_SEEN:'+(process.env.PATH??'')+'\\n');
+(async()=>{${body}})().catch(e=>{console.error(e);process.exitCode=1;});`);
   return { file, log };
 }
 
@@ -192,8 +186,8 @@ test('多候选：白名单目录里的 claude rank=1，PATH 里的排在后面'
   const env = withEnv();
   try {
     process.env.PATH = [env.pathBin, path.join(env.dir, 'empty')].join(path.delimiter);
-    const whitelisted = fakeCli(env.localBin, 'claude', 'echo "whitelisted 1.0.0"; exit 0');
-    const onPath = fakeCli(env.pathBin, 'claude', 'echo "on-path 2.0.0"; exit 0');
+    const whitelisted = fakeCli(env.localBin, 'claude', "console.log(\"whitelisted 1.0.0\");process.exit(0);");
+    const onPath = fakeCli(env.pathBin, 'claude', "console.log(\"on-path 2.0.0\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -215,8 +209,8 @@ test('多候选：白名单目录里的 claude rank=1，PATH 里的排在后面'
 test('只找指定 provider：provider=codex 时不去探 claude', async () => {
   const env = withEnv();
   try {
-    fakeCli(env.localBin, 'claude', 'echo "claude 1.0.0"; exit 0');
-    const codex = fakeCli(env.localBin, 'codex', 'echo "codex 9.9.9"; exit 0');
+    fakeCli(env.localBin, 'claude', "console.log(\"claude 1.0.0\");process.exit(0);");
+    const codex = fakeCli(env.localBin, 'codex', "console.log(\"codex 9.9.9\");process.exit(0);");
 
     const result = await detectCli({ provider: 'codex' });
 
@@ -235,7 +229,7 @@ test('只找指定 provider：provider=codex 时不去探 claude', async () => {
 test('version 文本：取 --version 首行，exit_code=0', async () => {
   const env = withEnv();
   try {
-    const cli = fakeCli(env.localBin, 'claude', 'echo "1.2.3"; exit 0');
+    const cli = fakeCli(env.localBin, 'claude', "console.log(\"1.2.3\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -259,7 +253,7 @@ test('version 文本：多行 banner 只取首行，超长截断到 200 字符',
     // 子进程的 PATH 只有被测环境那一个空目录，外部命令一个都找不到——这恰好也是
     // env 白名单在起作用的旁证。
     const long = 'v'.repeat(400);
-    fakeCli(env.localBin, 'claude', `echo "${long}"; echo "second line"; exit 0`);
+    fakeCli(env.localBin, 'claude', `console.log(${JSON.stringify(long)});console.log("second line");process.exit(0);`);
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -277,7 +271,7 @@ test('非 UTF-8 输出：不抛错，非法字节变成 U+FFFD', async () => {
   const env = withEnv();
   try {
     // 0xff 0xfe 在 UTF-8 里是非法起始字节。
-    fakeCli(env.localBin, 'claude', `printf '\\377\\376 broken\\n'; exit 0`);
+    fakeCli(env.localBin, 'claude', "process.stdout.write(Buffer.from([255,254,32,98,114,111,107,101,110,10]));process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -298,7 +292,7 @@ test('非 UTF-8 输出：不抛错，非法字节变成 U+FFFD', async () => {
 test('控制字符被剔除：ANSI 转义不进 version 文本', async () => {
   const env = withEnv();
   try {
-    fakeCli(env.localBin, 'claude', `printf '\\033[31m1.2.3\\033[0m\\n'; exit 0`);
+    fakeCli(env.localBin, 'claude', "process.stdout.write(Buffer.from([27,91,51,49,109,49,46,50,46,51,27,91,48,109,10]));process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -315,8 +309,8 @@ test('控制字符被剔除：ANSI 转义不进 version 文本', async () => {
 test('超时：探针 3 秒上限，超时仍如实返回候选', async () => {
   const env = withEnv();
   try {
-    // `/bin/sleep` 写绝对路径：子进程的 PATH 只有一个空目录，裸 `sleep` 找不到。
-    fakeCli(env.localBin, 'claude', '/bin/sleep 5; echo "never"; exit 0');
+    // 延迟由 Node 定时器实现，不依赖 PATH 中的外部命令。
+    fakeCli(env.localBin, 'claude', "await new Promise(r=>setTimeout(r,5000));console.log(\"never\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -336,9 +330,9 @@ test('超时：探针 3 秒上限，超时仍如实返回候选', async () => {
 test('非零退出：列为候选但不被推荐', async () => {
   const env = withEnv();
   try {
-    const broken = fakeCli(env.localBin, 'claude', 'echo "boom" >&2; exit 3');
+    const broken = fakeCli(env.localBin, 'claude', "console.error(\"boom\");process.exit(3);");
     process.env.PATH = [env.pathBin, path.join(env.dir, 'empty')].join(path.delimiter);
-    const good = fakeCli(env.pathBin, 'claude', 'echo "2.0.0"; exit 0');
+    const good = fakeCli(env.pathBin, 'claude', "console.log(\"2.0.0\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -357,8 +351,8 @@ test('非零退出：列为候选但不被推荐', async () => {
 test('auth_status 恒为 unknown：检测从不执行 auth/login/status 子命令', async () => {
   const env = withEnv();
   try {
-    const claude = fakeCli(env.localBin, 'claude', 'echo "1.0.0"; exit 0');
-    const codex = fakeCli(env.localBin, 'codex', 'echo "2.0.0"; exit 0');
+    const claude = fakeCli(env.localBin, 'claude', "console.log(\"1.0.0\");process.exit(0);");
+    const codex = fakeCli(env.localBin, 'codex', "console.log(\"2.0.0\");process.exit(0);");
 
     const result = await detectCli({});
 
@@ -391,25 +385,25 @@ test('auth_status 恒为 unknown：检测从不执行 auth/login/status 子命�
  * 一个会响应 `--help` 的假 CLI 的脚本体：help 分支按传入的脚本行作答，`--version`
  * 一律正常退出（这样「help 怎么样」和「候选是否可用」能被分开断言）。
  *
- * help 文本只用 `echo` / `printf` 拼出来：探针给子进程的 PATH 只有被测环境那一个空目录，
+ * help 文本由 Node 子进程输出：探针给子进程的 PATH 只有被测环境那一个空目录，
  * `cat` 之类的外部命令一个都找不到。
  */
 const helpBody = (branch: string[]): string =>
   [
     // claude 用根 `--help`；codex 用子命令 `exec --help`。两者都要命中 help 分支。
-    'if [ "$1" = "--help" ] || { [ "$1" = "exec" ] && [ "$2" = "--help" ]; }; then',
+    "if(process.argv.includes('--help')) {",
     ...branch.map((line) => `  ${line}`),
-    'fi',
-    'echo "1.2.3"; exit 0',
+    '}',
+    "console.log(\"1.2.3\");process.exit(0);",
   ].join('\n');
 
 /** 一份「长得像真 CLI」的 help：非交互开关、输出格式列表、`--model` 都有。 */
 const HELP_BODY = helpBody([
-  'echo "Usage: claude [options]"',
-  'echo "  -p, --print            Print (non-interactive) mode"',
-  `echo '  --output-format <fmt>  Output format: "json", "text", "stream"'`,
-  'echo "  --model <name>         Model to use"',
-  'exit 0',
+  "console.log(\"Usage: claude [options]\");",
+  "console.log(\"  -p, --print            Print (non-interactive) mode\");",
+  "console.log(\"  --output-format <fmt>  Output format: \\\"json\\\", \\\"text\\\", \\\"stream\\\"\");",
+  "console.log(\"  --model <name>         Model to use\");",
+  "process.exit(0);",
 ]);
 
 test('help 探测：解析出非交互开关、--model、--output-format 的可选值', async () => {
@@ -456,7 +450,7 @@ test('help 超时：能力取保守默认，但候选仍由 --version 决定可�
   const env = withEnv();
   try {
     // `/bin/sleep` 写绝对路径：子进程 PATH 只有一个空目录，裸 `sleep` 找不到。
-    const cli = fakeCli(env.localBin, 'claude', helpBody(['/bin/sleep 5', 'exit 0']));
+    const cli = fakeCli(env.localBin, 'claude', helpBody(["await new Promise(r=>setTimeout(r,5000));", "process.exit(0);"]));
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -480,7 +474,7 @@ test('help 超时：能力取保守默认，但候选仍由 --version 决定可�
 test('help 非零退出：help_checked=false，候选仍可用且仍被推荐', async () => {
   const env = withEnv();
   try {
-    const cli = fakeCli(env.localBin, 'claude', helpBody(['echo "no help for you" >&2', 'exit 3']));
+    const cli = fakeCli(env.localBin, 'claude', helpBody(["console.error(\"no help for you\");", "process.exit(3);"]));
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -496,7 +490,7 @@ test('help 非零退出：help_checked=false，候选仍可用且仍被推荐', 
 test('help 输出乱码：不抛错，响应仍可 JSON 序列化', async () => {
   const env = withEnv();
   try {
-    fakeCli(env.localBin, 'claude', helpBody([`printf '\\377\\376 broken\\n'`, 'exit 0']));
+    fakeCli(env.localBin, 'claude', helpBody(["process.stdout.write(Buffer.from([255,254,32,98,114,111,107,101,110,10]));", "process.exit(0);"]));
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -516,7 +510,7 @@ test('help 里 --output-format 但没有 json：不建议任何 argv', async () 
     fakeCli(
       env.localBin,
       'claude',
-      helpBody([`echo '  --output-format  Output format: "text", "yaml"'`, 'exit 0']),
+      helpBody(["console.log(\"  --output-format  Output format: \\\"text\\\", \\\"yaml\\\"\");", "process.exit(0);"]),
     );
 
     const result = await detectCli({ provider: 'claude' });
@@ -534,7 +528,7 @@ test('help 解析按独立 token：--model-list / -points 不算', async () => {
     fakeCli(
       env.localBin,
       'claude',
-      helpBody(['echo "  --model-list   List models"', 'echo "  show -points only"', 'exit 0']),
+      helpBody(["console.log(\"  --model-list   List models\");", "console.log(\"  show -points only\");", "process.exit(0);"]),
     );
 
     const caps = (await detectCli({ provider: 'claude' })).candidates[0].capabilities;
@@ -555,10 +549,10 @@ test('help 带 ANSI 颜色：转义被剥掉后仍能认出 flag', async () => {
       env.localBin,
       'claude',
       helpBody([
-        `printf '  \\033[1m-p, --print\\033[0m  Print mode\\n'`,
-        `printf '  \\033[1m--model\\033[0m <name>  Model\\n'`,
-        `printf '  \\033[1m--output-format\\033[0m <fmt>  Output format: "json"\\n'`,
-        'exit 0',
+        "process.stdout.write(Buffer.from([32,32,27,91,49,109,45,112,44,32,45,45,112,114,105,110,116,27,91,48,109,32,32,80,114,105,110,116,32,109,111,100,101,10]));",
+        "process.stdout.write(Buffer.from([32,32,27,91,49,109,45,45,109,111,100,101,108,27,91,48,109,32,60,110,97,109,101,62,32,32,77,111,100,101,108,10]));",
+        "process.stdout.write(Buffer.from([32,32,27,91,49,109,45,45,111,117,116,112,117,116,45,102,111,114,109,97,116,27,91,48,109,32,60,102,109,116,62,32,32,79,117,116,112,117,116,32,102,111,114,109,97,116,58,32,34,106,115,111,110,34,10]));",
+        "process.exit(0);",
       ]),
     );
 
@@ -581,7 +575,7 @@ test('model unsupported：config_patch.model=null、model_source=cli-config', as
   const env = withEnv();
   try {
     // 即便 CLI 自称支持一堆模型，检测也不采信、不猜。
-    fakeCli(env.localBin, 'claude', 'echo "1.0.0 (models: opus, sonnet)"; exit 0');
+    fakeCli(env.localBin, 'claude', "console.log(\"1.0.0 (models: opus, sonnet)\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -602,10 +596,10 @@ test('manual sources retained：PUT 标了 manual 后，detect 不覆盖配置',
   try {
     const db = freshDb();
     const router = buildRouter(() => db);
-    const manualPath = fakeCli(env.localBin, 'claude', 'echo "1.0.0"; exit 0').file;
+    const manualPath = fakeCli(env.localBin, 'claude', "console.log(\"1.0.0\");process.exit(0);").file;
     // 另一个候选，detect 会把它算作可用——如果后端擅自写回，就会顶掉手动值。
     process.env.PATH = [env.pathBin, path.join(env.dir, 'empty')].join(path.delimiter);
-    fakeCli(env.pathBin, 'codex', 'echo "2.0.0"; exit 0');
+    fakeCli(env.pathBin, 'codex', "console.log(\"2.0.0\");process.exit(0);");
 
     writeConfigFile({});
     const before = readRuntimeConfig();
@@ -781,7 +775,7 @@ test('persist=true：manual 字段的值与标记都原样保留', async () => {
     const db = freshDb();
     const router = buildRouter(() => db);
     // 手动指定的那个二进制，和 detect 实际会推荐的那个，刻意不是同一个文件。
-    const manualPath = fakeCli(env.localBin, 'claude-manual', 'echo "0.0.1"; exit 0').file;
+    const manualPath = fakeCli(env.localBin, 'claude-manual', "console.log(\"0.0.1\");process.exit(0);").file;
     const detected = fakeCli(env.localBin, 'claude', HELP_BODY).file;
 
     writeConfigFile({});
@@ -963,7 +957,7 @@ test('secret-like env：子进程只拿到 PATH，看不到 API key', async () =
     },
   });
   try {
-    const cli = fakeCli(env.localBin, 'claude', 'echo "1.0.0"; exit 0');
+    const cli = fakeCli(env.localBin, 'claude', "console.log(\"1.0.0\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
     assert.equal(result.candidates.length, 1);
@@ -1013,7 +1007,7 @@ test('不读凭据文件：假 HOME 下的 .claude 凭据从未被打开', async
     fs.writeFileSync(credFile, JSON.stringify({ token: 'must-not-be-read' }));
 
     opened.length = 0; // 布置现场产生的读写不算
-    fakeCli(env.localBin, 'claude', 'echo "1.0.0"; exit 0');
+    fakeCli(env.localBin, 'claude', "console.log(\"1.0.0\");process.exit(0);");
     opened.length = 0; // 写假 CLI 也不算
 
     const result = await detectCli({ provider: 'claude' });
@@ -1045,7 +1039,7 @@ test('命令注入：basename 带 shell 元字符的文件不被执行、也不�
     const evilName = 'claude; echo pwned';
     const evil = path.join(env.localBin, evilName);
     fs.writeFileSync(evil, `#!/bin/sh\necho "pwned" > "${canary}"\nexit 0\n`, { mode: 0o755 });
-    const real = fakeCli(env.localBin, 'claude', 'echo "1.0.0"; exit 0');
+    const real = fakeCli(env.localBin, 'claude', "console.log(\"1.0.0\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -1068,7 +1062,7 @@ test('PATH 里的恶意条目：相对目录被忽略，不随 cwd 漂移', asyn
   try {
     // "." 这类相对条目含义随 cwd 变化，必须被丢掉。
     process.env.PATH = ['.', '', env.pathBin].join(path.delimiter);
-    const onPath = fakeCli(env.pathBin, 'claude', 'echo "1.0.0"; exit 0');
+    const onPath = fakeCli(env.pathBin, 'claude', "console.log(\"1.0.0\");process.exit(0);");
 
     const result = await detectCli({ provider: 'claude' });
 
@@ -1090,7 +1084,7 @@ test('目录与不可执行文件不算候选', async () => {
     // 一个名叫 claude 的**目录**，和一个不可执行的同名文件。
     fs.mkdirSync(path.join(env.localBin, 'claude'), { recursive: true });
     fs.mkdirSync(env.pathBin, { recursive: true });
-    fs.writeFileSync(path.join(env.pathBin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+    fs.writeFileSync(path.join(env.pathBin, process.platform==='win32'?'claude.cmd':'claude'), 'not executable', {mode:0o644});
     process.env.PATH = [env.pathBin].join(path.delimiter);
 
     const result = await detectCli({ provider: 'claude' });
@@ -1109,7 +1103,7 @@ test('POST /api/agent/runtime-detect：返回检测契约，且零写入', async
   try {
     const db = freshDb();
     const router = buildRouter(() => db);
-    fakeCli(env.localBin, 'claude', 'echo "1.0.0"; exit 0');
+    fakeCli(env.localBin, 'claude', "console.log(\"1.0.0\");process.exit(0);");
 
     const result = await callRoute<RuntimeDetectResponse>(
       router,

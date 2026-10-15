@@ -92,6 +92,11 @@ class ClientTestCase(unittest.TestCase):
             return dict(SNAPSHOT) if method == "GET" else {"snapshot": SNAPSHOT}
 
         pwq_client.request = fake_request
+        # These tests pin command-to-payload mapping. The preview transport is
+        # covered separately by tests/python/test_windows_portability.py.
+        real_submit = pwq_client.submit_or_control
+        pwq_client.submit_or_control = lambda args, method, path, body, key: pwq_client.request(args.base, method, path, body=body, key=key)
+        self.addCleanup(lambda: setattr(pwq_client, 'submit_or_control', real_submit))
         self.addCleanup(lambda: setattr(pwq_client, "request", self._real_request))
 
     def run_client(self, *argv) -> dict | list:

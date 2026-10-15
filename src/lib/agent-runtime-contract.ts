@@ -1,3 +1,4 @@
+import {absoluteFilesystemPath, hasParentPathSegment} from '../../shared/filesystem-path.ts';
 /**
  * Agent runtime（本机 Claude / Codex CLI）前端契约的纯逻辑层。
  *
@@ -222,10 +223,10 @@ export interface PathCheck {
 export function checkWorkingDir(raw: string): PathCheck {
   const value = raw.trim();
   if (value === '') return { ok: false, error: '工作目录必填，需位于项目目录内。' };
-  if (value.includes('..')) {
+  if (hasParentPathSegment(value)) {
     return { ok: false, error: '工作目录不能包含「..」上跳，请填项目目录内的绝对路径。' };
   }
-  const isAbsolute = value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value);
+  const isAbsolute = absoluteFilesystemPath(value);
   if (!isAbsolute) {
     return { ok: false, error: '请填项目目录内的绝对路径。' };
   }
@@ -248,7 +249,7 @@ export function validateConfig(form: AgentConfigForm): string[] {
   const errors: string[] = [];
   if (form.enabled) {
     if (!form.cli_path.trim()) errors.push('启用时必须填写 CLI 绝对路径。');
-    else if (!form.cli_path.trim().startsWith('/') && !/^[A-Za-z]:[\\/]/.test(form.cli_path.trim())) {
+    else if (!absoluteFilesystemPath(form.cli_path.trim())) {
       errors.push('CLI 路径必须是绝对路径。');
     }
   }

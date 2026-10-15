@@ -1,0 +1,4 @@
+# Separate from TTS: qwen-asr pins transformers 4.57.6.
+qwen-asr==0.0.6
+torch==2.10.0
+numpy==2.2.6

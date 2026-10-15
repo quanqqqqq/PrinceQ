@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 /**
  * 本地 CLI Agent 运行时的隔离测试。
  *
@@ -5,7 +6,7 @@
  * （`withTempHabits`），运行时配置指向临时目录（`PWQ_AGENT_RUNTIME_CONFIG`）。用户的
  * `data/work-queue.db` 与 `habits/` 一个字节都不会被写。
  *
- * **绝不调用真实的 `claude` / `codex`**：每个用例自己写一个 shell 脚本当假 CLI，
+ * **绝不调用真实的 `claude` / `codex`**：每个用例自己写一个 Node 脚本当假 CLI，
  * 按需要装成「正常回答」「超时」「非零退出」「输出乱码」。这样既能跑真实的 spawn
  * 路径（argv 传递、环境白名单、输出截断、信号终止都是真的），又完全离线、可重复。
  *
@@ -82,25 +83,12 @@ async function callRoute<T>(
 }
 
 /**
- * 写一个假 CLI。`body` 是 sh 脚本正文，`$@` 就是真实传进来的 argv。
+ * 写一个假 CLI。`body` 是 JavaScript 正文，process.argv 接收实际参数。
  *
  * 脚本对 `--version` 一律快速成功退出：健康探测走的是这条路，业务行为写在它后面。
  */
 function fakeCli(name: string, body: string): string {
-  const file = path.join(binDir, name);
-  fs.writeFileSync(
-    file,
-    [
-      '#!/bin/sh',
-      // 健康探测只问「你能跑吗」，不该触发下面的业务分支。
-      'for a in "$@"; do',
-      '  if [ "$a" = "--version" ]; then echo "fake-cli 1.0.0"; exit 0; fi',
-      'done',
-      body,
-    ].join('\n'),
-    { mode: 0o755 },
-  );
-  return file;
+  return nodeCli(path.join(binDir, name), body, true);
 }
 
 interface PutResult {
@@ -173,7 +161,7 @@ test('未配置运行时：走确定性解析，fallback_reason 说明未启用'
 
 test('enabled=false：同样走确定性解析', async () => {
   const ctx = setup();
-  writeConfigFile({ enabled: false, cli_path: fakeCli('never-called.sh', 'echo SHOULD_NOT_RUN') });
+  writeConfigFile({ enabled: false, cli_path: fakeCli('never-called.sh', "console.log('SHOULD_NOT_RUN');") });
 
   const res = await sendMessage(ctx, { message: 'show goals' });
 
@@ -206,7 +194,7 @@ test('cli_path 指向不存在的文件：auto 回落确定性，状态路由报
 
 test('CLI 返回纯文本：agent 模式给出 answer', async () => {
   const ctx = setup();
-  writeConfigFile({ enabled: true, cli_path: fakeCli('plain.sh', 'echo "你好"') });
+  writeConfigFile({ enabled: true, cli_path: fakeCli('plain.sh', "console.log('你好');") });
   await primeHealth();
 
   const res = await sendMessage(ctx, { message: '随便聊聊', processing_mode: 'agent' });
@@ -226,9 +214,7 @@ test('JSON proposed_actions：先 preview，确认前 tasks 表为空，确认�
     enabled: true,
     cli_path: fakeCli(
       'json.sh',
-      `cat <<'EOF'
-{"answer":"好的","proposed_actions":[{"action":"create_task","title":"写测试"}]}
-EOF`,
+      `console.log(JSON.stringify({"answer":"好的","proposed_actions":[{"action":"create_task","title":"写测试"}]}));`,
     ),
   });
   await primeHealth();
@@ -255,9 +241,7 @@ test('预览可以取消，且取消后不写任何数据', async () => {
     enabled: true,
     cli_path: fakeCli(
       'json-cancel.sh',
-      `cat <<'EOF'
-{"answer":"好的","proposed_actions":[{"action":"create_task","title":"不该被创建"}]}
-EOF`,
+      `console.log(JSON.stringify({"answer":"好的","proposed_actions":[{"action":"create_task","title":"不该被创建"}]}));`,
     ),
   });
   await primeHealth();
@@ -285,7 +269,7 @@ test('超时：报 agent-error 且不自动回退；显式 fallback 才走确定
   writeConfigFile({
     enabled: true,
     timeout_ms: 700,
-    cli_path: fakeCli('slow.sh', 'sleep 5\necho "太慢了"'),
+    cli_path: fakeCli('slow.sh', 'setTimeout(()=>console.log("太慢了"),5000);'),
   });
   await primeHealth();
 
@@ -311,7 +295,7 @@ test('超时：报 agent-error 且不自动回退；显式 fallback 才走确定
 
 test('非零退出码：报 agent-error，不静默回退', async () => {
   const ctx = setup();
-  writeConfigFile({ enabled: true, cli_path: fakeCli('boom.sh', 'echo "坏了" >&2\nexit 3') });
+  writeConfigFile({ enabled: true, cli_path: fakeCli('boom.sh', 'console.error("坏了");process.exitCode=3;') });
   await primeHealth();
 
   const res = await sendMessage(ctx, { message: 'show queue', processing_mode: 'agent' });
@@ -327,7 +311,7 @@ test('输出不是 JSON：当作纯文本回答，不报错', async () => {
   const ctx = setup();
   writeConfigFile({
     enabled: true,
-    cli_path: fakeCli('garbage.sh', 'echo "}{ not json at all ][ %%%"'),
+    cli_path: fakeCli('garbage.sh', "console.log('}{ not json at all ][ %%%');"),
   });
   await primeHealth();
 
@@ -345,7 +329,7 @@ test('CLI 输出 200KB：不炸，stdout 被截断到上限', async () => {
     executable: fakeCli(
       'flood.sh',
       // 2000 行 × ~100 字符 ≈ 200KB，远超 64KiB 上限。
-      'i=0\nwhile [ $i -lt 2000 ]; do printf "%0100d\\n" $i; i=$((i+1)); done',
+      'for(let i=0;i<2000;i++)console.log(String(i).padStart(100,"0"));',
     ),
     args: [],
     cwd: ROOT_DIR,
@@ -368,10 +352,10 @@ test('环境白名单：未被允许的变量不传给子进程', async () => {
       executable: fakeCli(
         'envcheck.sh',
         [
-          '[ -n "$PWQ_SHOULD_NOT_EXIST" ] && echo LEAK',
-          '[ -n "$PWQ_ALLOWED_MARKER" ] && echo ALLOWED_PRESENT',
-          '[ -n "$PATH" ] && echo PATH_PRESENT',
-          'exit 0',
+          "if(process.env.PWQ_SHOULD_NOT_EXIST)console.log('LEAK');",
+          "if(process.env.PWQ_ALLOWED_MARKER)console.log('ALLOWED_PRESENT');",
+          "if(process.env.PATH)console.log('PATH_PRESENT');",
+          'process.exit(0);',
         ].join('\n'),
       ),
       args: [],
@@ -405,7 +389,7 @@ test('working_directory 指向项目外：PUT 被 400 拒绝', async () => {
           config: {
             enabled: true,
             provider: 'claude',
-            cli_path: '/bin/echo',
+            cli_path: process.execPath,
             model: null,
             args: [],
             timeout_ms: 20000,
@@ -546,7 +530,7 @@ test('args 含 NUL：被校验拒绝', async () => {
           config: {
             enabled: true,
             provider: 'claude',
-            cli_path: '/bin/echo',
+            cli_path: process.execPath,
             model: null,
             args: ['--flag injected'],
             timeout_ms: 20000,
@@ -591,7 +575,7 @@ test('buildProviderPromptArgs 产出数组，prompt 永远是单个 argv 元素'
 test('shell:false —— 元字符不会被执行', async () => {
   // 脚本把收到的第一个参数原样打印。若走了 shell，`$(...)` 会被求值。
   const result = await runCli({
-    executable: fakeCli('argecho.sh', 'printf "%s" "$1"'),
+    executable: fakeCli('argecho.sh', 'process.stdout.write(process.argv[2]);'),
     args: ['$(echo EXECUTED)'],
     cwd: ROOT_DIR,
     envNames: ['PATH'],
@@ -609,7 +593,7 @@ test('PUT：首次成功、旧 version 409、同内容重 PUT 不 bump', async (
   const payload = {
     enabled: true,
     provider: 'claude' as const,
-    cli_path: fakeCli('cfg.sh', 'echo hi'),
+    cli_path: fakeCli('cfg.sh', "console.log('hi');"),
     model: null,
     args: [],
     timeout_ms: 20000,
@@ -666,7 +650,7 @@ test('GET runtime-config 不回显任何环境变量的值', async () => {
 
 test('runtime-test：CLI 回 OK 则 ok=true，且不建 session、不写库', async () => {
   const ctx = setup();
-  writeConfigFile({ enabled: true, cli_path: fakeCli('ok.sh', 'echo OK') });
+  writeConfigFile({ enabled: true, cli_path: fakeCli('ok.sh', "console.log('OK');") });
 
   const res = await callRoute<{ ok: boolean; stdout_excerpt: string }>(
     ctx.router,
@@ -685,7 +669,7 @@ test('runtime-test：CLI 回 OK 则 ok=true，且不建 session、不写库', as
 
 test('runtime-test：关闭状态也可以验证连接，但不会启用助手', async () => {
   const ctx = setup();
-  writeConfigFile({ enabled: false, cli_path: fakeCli('unused.sh', 'echo OK') });
+  writeConfigFile({ enabled: false, cli_path: fakeCli('unused.sh', "console.log('OK');") });
 
   const res = await callRoute<{ ok: boolean; reason: string }>(
     ctx.router,
@@ -704,7 +688,7 @@ test('runtime-test：关闭状态也可以验证连接，但不会启用助手',
 
 test('processing_mode=command：即使 agent 就绪也走确定性解析', async () => {
   const ctx = setup();
-  writeConfigFile({ enabled: true, cli_path: fakeCli('ready.sh', 'echo "不该被调用"') });
+  writeConfigFile({ enabled: true, cli_path: fakeCli('ready.sh', "console.log('不该被调用');") });
   await primeHealth();
 
   const res = await sendMessage(ctx, { message: 'show queue', processing_mode: 'command' });
@@ -715,7 +699,7 @@ test('processing_mode=command：即使 agent 就绪也走确定性解析', async
 
 test('agent 失败时仍然保留用户的原始消息', async () => {
   const ctx = setup();
-  writeConfigFile({ enabled: true, cli_path: fakeCli('fail.sh', 'exit 9') });
+  writeConfigFile({ enabled: true, cli_path: fakeCli('fail.sh', 'process.exit(9);') });
   await primeHealth();
 
   await sendMessage(ctx, { message: '这句话必须被保留', processing_mode: 'agent' });
@@ -739,7 +723,7 @@ test('真实业务库与 habits 未被触碰：本文件全程用内存库 + 临
 
 test('启用后的首条助手消息自动检查 CLI，无需先打开设置或查询状态', async () => {
   const ctx = setup();
-  writeConfigFile({enabled:true, cli_path:fakeCli('cold-ready.sh', 'echo "cold-start-answer"')});
+  writeConfigFile({enabled:true, cli_path:fakeCli('cold-ready.sh', "console.log('cold-start-answer');")});
   invalidateHealth();
   const result = await sendMessage(ctx, {message:'请回答', processing_mode:'agent'});
   assert.equal(result.source, 'agent');

@@ -8,6 +8,7 @@
  * `isAgentReady` 只做廉价的 fs 检查、**从不 spawn**，因为它在请求路径上同步调用。
  */
 import fs from 'node:fs';
+import {executableFile} from '../lib/process-launch.ts';
 import { runCli } from './cli-exec.ts';
 import type { AgentRuntimeConfig } from './runtime-config.ts';
 
@@ -45,11 +46,7 @@ function executableOnDisk(cliPath: string): { ok: boolean; reason: string | null
   } catch {
     return { ok: false, reason: 'cli_not_found' };
   }
-  try {
-    fs.accessSync(cliPath, fs.constants.X_OK);
-  } catch {
-    return { ok: false, reason: 'cli_not_executable' };
-  }
+  if (!executableFile(cliPath)) return {ok: false, reason: 'cli_not_executable'};
   return { ok: true, reason: null };
 }
 

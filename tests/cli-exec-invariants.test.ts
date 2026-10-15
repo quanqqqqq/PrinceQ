@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 /**
  * `cli-exec.ts` 新执行链路的隔离测试。
  *
@@ -24,22 +25,14 @@ const { ROOT_DIR } = await import('../server/config.ts');
 const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pwq-cli-exec-bin-'));
 
 function fakeCli(name: string, body: string): string {
-  const file = path.join(binDir, name);
-  fs.writeFileSync(
-    file,
-    ['#!/bin/sh', 'for a in "$@"; do [ "$a" = "--version" ] && { echo v; exit 0; }; done', body].join(
-      '\n',
-    ),
-    { mode: 0o755 },
-  );
-  return file;
+  return nodeCli(path.join(binDir, name), body, true);
 }
 
 test('stdin 默认 EOF：子进程 read 立刻结束，不等输入（codex 挂死回归）', async () => {
   const cli = fakeCli(
     'stdin_eof.sh',
     // stdin 是 /dev/null 时 `read` 立即失败；若是一个开着的 pipe/TTY，它会一直等到超时。
-    'if read -r line; then echo "GOT:${line}"; else echo "STDIN_EOF"; fi',
+    "let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>console.log(input?'GOT:'+input:'STDIN_EOF'));",
   );
   const r = await runCli({ executable: cli, args: [], cwd: ROOT_DIR, envNames: [], timeoutMs: 5000 });
   assert.equal(r.exitCode, 0, `应正常退出：${r.stderr}`);
@@ -48,7 +41,7 @@ test('stdin 默认 EOF：子进程 read 立刻结束，不等输入（codex 挂�
 });
 
 test('input 文本：通过 pipe 写入并立刻 end，子进程能读到', async () => {
-  const cli = fakeCli('stdin_echo.sh', 'cat');
+  const cli = fakeCli('stdin_echo.sh', 'process.stdin.pipe(process.stdout);');
   const r = await runCli({
     executable: cli,
     args: [],
@@ -69,11 +62,11 @@ test('安全 env：HOME 等基础变量自动继承；危险变量即便点名�
     const cli = fakeCli(
       'envprobe.sh',
       [
-        '[ -n "$NODE_OPTIONS" ] && echo "NODE_OPTIONS_LEAK"',
-        '[ -n "$DYLD_INSERT_LIBRARIES" ] && echo "DYLD_LEAK"',
-        '[ -n "$PWQ_OK_MARKER" ] && echo "OK_PRESENT"',
-        '[ -n "$HOME" ] && echo "HOME_PRESENT"',
-        '[ -n "$PATH" ] && echo "PATH_PRESENT"',
+        "if(process.env.NODE_OPTIONS)console.log('NODE_OPTIONS_LEAK');",
+        "if(process.env.DYLD_INSERT_LIBRARIES)console.log('DYLD_LEAK');",
+        "if(process.env.PWQ_OK_MARKER)console.log('OK_PRESENT');",
+        "if(process.env.HOME)console.log('HOME_PRESENT');",
+        "if(process.env.PATH)console.log('PATH_PRESENT');",
       ].join('\n'),
     );
     const r = await runCli({
@@ -112,13 +105,13 @@ test('cfg.args 去重：用户重复声明硬编码拥有的 flag（含其值）
 });
 
 test('超时：子进程不退出会被 SIGTERM→SIGKILL 收敛成 timedOut', async () => {
-  const cli = fakeCli('slow.sh', 'sleep 5');
+  const cli = fakeCli('slow.sh', 'setTimeout(()=>{},5000);');
   const r = await runCli({ executable: cli, args: [], cwd: ROOT_DIR, envNames: [], timeoutMs: 600 });
   assert.equal(r.timedOut, true, '应标记超时');
 });
 
 test('非零退出码原样返回（不抛）', async () => {
-  const cli = fakeCli('boom.sh', 'echo oops >&2; exit 3');
+  const cli = fakeCli('boom.sh', "console.error('oops');process.exitCode=3;");
   const r = await runCli({ executable: cli, args: [], cwd: ROOT_DIR, envNames: [], timeoutMs: 5000 });
   assert.equal(r.exitCode, 3);
   assert.match(r.stderr, /oops/);

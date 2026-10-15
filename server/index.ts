@@ -5,7 +5,8 @@
  */
 import http from 'node:http';
 import { API_HOST, API_PORT } from './config.ts';
-import { getDb } from './db/connection.ts';
+import {stopRuntimeProcesses} from './lib/process-launch.ts';
+import { closeDb, getDb } from './db/connection.ts';
 import {startHabitInferenceWorker} from './agent/habit-inference.ts';
 import {stopQwenWorker} from './voice/qwen-runtime.ts';
 import { buildRouter, STREAMING_PATHS } from './http/routes.ts';
@@ -83,7 +84,11 @@ if (isMain) {
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
-      server.close(() => process.exit(0));
+      stopQwenWorker();
+      stopRuntimeProcesses();
+      const forceClose = setTimeout(() => server.closeAllConnections(), 5000);
+      forceClose.unref();
+      server.close(() => {clearTimeout(forceClose);closeDb();process.exit(0);});
     });
   }
 }

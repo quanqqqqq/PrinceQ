@@ -66,3 +66,11 @@ export async function synthesizeAgentSpeech(result: AgentResult, signal?: AbortS
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return new Blob([bytes], {type: payload.mime_type || 'audio/wav'});
 }
+
+/** Checks dependencies only; downloading/loading models remains an explicit voice action. */
+export async function checkAgentVoice(operation: 'asr' | 'tts', signal?: AbortSignal): Promise<void> {
+  const response = await fetch('/api/agent/voice/status', {signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12_000)]) : AbortSignal.timeout(12_000)});
+  if (!response.ok) throw new Error('无法检查本地语音环境，请检查 API 服务。');
+  const status = await response.json() as {asr: {available: boolean; reason: string | null}; tts: {available: boolean; reason: string | null}};
+  if (!status[operation]?.available) throw new Error(status[operation]?.reason ?? '请先运行 npm run voice:setup。');
+}

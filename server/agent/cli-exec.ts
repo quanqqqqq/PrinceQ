@@ -10,6 +10,7 @@
  * 3. **输出有上限、超时必杀。** 先 SIGTERM 给清理机会，2 秒后 SIGKILL 兜底。
  */
 import { spawn } from 'node:child_process';
+import {resolveCliLaunch, terminateProcessTree, trackRuntimeProcess} from '../lib/process-launch.ts';
 import type { AgentRuntimeConfig } from './runtime-config.ts';
 
 export interface ExecResult {
@@ -111,29 +112,27 @@ const DENIED_ENV_NAMES = new Set<string>([
  * 基础变量只有「当前进程里真有值」才塞——不存在的名字不塞成空串，因为空值和未设置
  * 对多数 CLI 含义不同。用户白名单同理，且还要再过一遍 denylist。
  */
-export function buildCliEnv(envNames: string[], provider?: AgentRuntimeConfig['provider']): Record<string, string> {
-  const names: string[] = [...BASE_ENV_NAMES, ...(provider === 'codex' ? CODEX_ENV_NAMES : [])];
+export function buildCliEnv(envNames: string[], provider?: AgentRuntimeConfig['provider'],
+  source: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const windows = platform === 'win32';
+  const names: string[] = [...BASE_ENV_NAMES, ...(provider === 'codex' ? CODEX_ENV_NAMES : []),
+    ...(windows ? ['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'HOMEDRIVE', 'HOMEPATH'] : [])];
   const env: Record<string, string> = {};
-
-  for (const name of names) {
-    const value = process.env[name];
-    if (typeof value === 'string') env[name] = value;
+  for (const name of [...names, ...envNames]) {
+    const key = windows ? name.toUpperCase() : name;
+    if (DENIED_ENV_NAMES.has(key)) continue;
+    const sourceKey = windows ? Object.keys(source).find(candidate => candidate.toUpperCase() === key) : name;
+    const value = sourceKey === undefined ? undefined : source[sourceKey];
+    if (typeof value === 'string') env[key] = value;
   }
-  // PATH 兜底：基础名里若恰好没有（极端环境），也至少给一个能用的。
-  if (env.PATH === undefined) env.PATH = process.env.PATH ?? '/usr/bin:/bin';
-
-  for (const name of envNames) {
-    if (DENIED_ENV_NAMES.has(name)) continue;
-    const value = process.env[name];
-    if (typeof value === 'string') env[name] = value;
-  }
-  // 防御性清扫：任何基础/白名单路径都不该把危险变量带进来。
-  for (const name of DENIED_ENV_NAMES) delete env[name];
+  if (env.PATH === undefined) env.PATH = windows ? '' : '/usr/bin:/bin';
+  if (windows && !env.HOME && env.USERPROFILE) env.HOME = env.USERPROFILE;
   return env;
 }
 
 export function runCli(opts: RunCliOptions): Promise<ExecResult> {
   const maxBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  if (opts.signal?.aborted) return Promise.resolve({exitCode: -1, stdout: '', stderr: '', timedOut: false, canceled: true});
 
   return new Promise<ExecResult>((resolve) => {
     let settled = false;
@@ -143,13 +142,17 @@ export function runCli(opts: RunCliOptions): Promise<ExecResult> {
     // stdin 永远不留开：不传 input → `/dev/null`（一读即 EOF，专治 codex 等在 stdin 上）；
     // 传了 input → pipe，写完立刻 end，同样立刻 EOF。两条路子进程都不会卡在「等更多输入」。
     const useStdinPipe = typeof opts.input === 'string';
-    const child = spawn(opts.executable, opts.args, {
+    let launch;
+    try { launch = resolveCliLaunch(opts.executable, opts.args); }
+    catch (error) { resolve({exitCode: -1, stdout: '', stderr: `spawn failed: ${(error as Error).message}`, timedOut: false, canceled: false}); return; }
+    const child = trackRuntimeProcess(spawn(launch.executable, launch.args, {
       shell: false,
       cwd: opts.cwd,
       env: buildCliEnv(opts.envNames, opts.provider),
       windowsHide: true,
+      detached: process.platform !== 'win32',
       stdio: [useStdinPipe ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-    });
+    }));
 
     if (useStdinPipe && child.stdin) {
       // A CLI may reject its argv before consuming a large context; async EPIPE must not crash the API.
@@ -198,13 +201,13 @@ export function runCli(opts: RunCliOptions): Promise<ExecResult> {
     /** SIGTERM → 宽限 → SIGKILL。两次 kill 都包 try：进程可能已经自己退了。 */
     const terminate = () => {
       try {
-        child.kill('SIGTERM');
+        terminateProcessTree(child, 'SIGTERM');
       } catch {
         // 已经退出，没有可杀的目标。
       }
       killTimer = setTimeout(() => {
         try {
-          child.kill('SIGKILL');
+          terminateProcessTree(child, 'SIGKILL');
         } catch {
           // 同上。
         }
@@ -227,6 +230,7 @@ export function runCli(opts: RunCliOptions): Promise<ExecResult> {
     const finish = (exitCode: number, extraStderr = '') => {
       if (settled) return;
       settled = true;
+      if ((timedOut || canceled) && process.platform !== 'win32') terminateProcessTree(child, 'SIGKILL');
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       opts.signal?.removeEventListener('abort', onAbort);

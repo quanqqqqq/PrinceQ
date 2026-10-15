@@ -460,7 +460,7 @@ export function AgentRuntimeSection() {
                   <Label htmlFor="agent-cli-path">CLI 路径（绝对路径）</Label>
                   <SourceBadge source={sources.cli_path} />
                 </div>
-                <Input id="agent-cli-path" value={form.cli_path} onChange={(e) => set('cli_path', e.target.value, 'cli_path')} placeholder="例如 /usr/local/bin/claude" className="bg-card!" autoComplete="off" spellCheck={false} />
+                <Input id="agent-cli-path" value={form.cli_path} onChange={(e) => set('cli_path', e.target.value, 'cli_path')} placeholder="CLI 可执行文件的完整路径" className="bg-card!" autoComplete="off" spellCheck={false} />
               </div>
             </div>
 
@@ -506,7 +506,7 @@ export function AgentRuntimeSection() {
                 <Label htmlFor="agent-dir">工作目录（项目目录内的绝对路径）</Label>
                 <SourceBadge source={sources.working_directory} />
               </div>
-              <Input id="agent-dir" value={form.working_directory} onChange={(e) => { set('working_directory', e.target.value, 'working_directory'); setDirError(checkWorkingDir(e.target.value).error ?? null); }} placeholder="例如 /Users/me/project" className="bg-card!" autoComplete="off" spellCheck={false} />
+              <Input id="agent-dir" value={form.working_directory} onChange={(e) => { set('working_directory', e.target.value, 'working_directory'); setDirError(checkWorkingDir(e.target.value).error ?? null); }} placeholder="PrinceQ 项目目录或其子目录" className="bg-card!" autoComplete="off" spellCheck={false} />
               <p className={cn('text-xs', dirError ? 'text-red-600' : 'text-muted-foreground')}>
                 {dirError ?? '必须落在项目目录内，不能让 CLI 在别处读写文件。'}
               </p>

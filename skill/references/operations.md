@@ -54,6 +54,8 @@ Skill 是标准 SKILL.md + Python 客户端，可复制给任何能发 HTTP 的 
 
 一期 auth.mode=none，没有认证身份或 scope 检查；X-PrinceQ-Agent 只记录来源。所有 Skill 接口统一经过 server/skills/access.ts 的 authorizePrinceQRequest(req, permission)，预留 read/preview/confirm/cancel 权限及 principal；后续在该入口接入 token/作用域，不改业务操作合同。客户端可预留 PWQ_API_TOKEN 发送 Bearer，但一期服务不会校验它。
 
+Windows 默认复制安装且支持重复更新，macOS/Linux 默认链接安装；命令与更新方式见 `INSTALL.md`。
+
 本机默认安装使用 `scripts/install_skill.py`：将同一 Skill 接入 ~/.claude/skills/personal-work-queue 和 ~/.agents/skills/personal-work-queue；应用内每轮直接注入 Skill，CLI 的自动触发与安全模式不会使其丢失。外部 Agent 的新会话可自动发现，是否加载由其 Skill 机制决定，不能保证任意厂商运行时都支持。
 
 

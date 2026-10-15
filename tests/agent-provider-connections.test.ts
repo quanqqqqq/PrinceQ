@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,8 +16,7 @@ const {adoptCandidate, allAutoSources} = await import('../src/lib/agent-runtime-
 const {agentRuntimeTestSchema} = await import('../server/http/schemas.ts');
 const {ApiError} = await import('../server/lib/errors.ts');
 
-const cli = path.join(tmp, 'claude');
-fs.writeFileSync(cli, '#!/bin/sh\necho OK\n', {mode: 0o755});
+const cli = nodeCli(path.join(tmp, 'claude'), "console.log('OK');");
 const base = {...defaultRuntimeConfig(), cli_path: cli, timeout_ms: 60000};
 const candidate = {provider:'codex' as const, path:cli, rank:1, exists:true, version:'fixture', exit_code:0,
   timed_out:false, latency_ms:1, auth_status:'unknown' as const,

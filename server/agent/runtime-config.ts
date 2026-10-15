@@ -1,3 +1,4 @@
+import {writeFileAtomically} from '../lib/atomic-file.ts';
 /**
  * 本地 CLI Agent 运行时配置的持久层。
  *
@@ -183,7 +184,8 @@ export function validateRuntimeConfigInput(
   }
 
   const resolved = path.resolve(input.working_directory);
-  const inside = resolved === ROOT_DIR || resolved.startsWith(ROOT_DIR + path.sep);
+  const relative = path.relative(ROOT_DIR, resolved);
+  const inside = relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
   if (!inside) {
     throw badRequest(
       `working_directory 必须位于项目目录内（${ROOT_DIR}），收到 "${resolved}"`,
@@ -291,18 +293,7 @@ export function writeRuntimeConfig(
  * 调用方必须先过 `agentRuntimeConfigSchema`——这个函数只负责落盘，不负责判断合法性。
  */
 function commit(config: AgentRuntimeConfig): AgentRuntimeConfig {
-  const target = agentRuntimeConfigPath();
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temp = `${target}.${process.pid}.tmp`;
-  const body = `${JSON.stringify(config, null, 2)}\n`;
-  const fd = fs.openSync(temp, 'w');
-  try {
-    fs.writeFileSync(fd, body);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  fs.renameSync(temp, target);
+  writeFileAtomically(agentRuntimeConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
 
   return config;
 }

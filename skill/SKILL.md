@@ -5,7 +5,7 @@ description: "查询和管理 PrinceQ 的个人任务、目标、工作队列与
 
 # PrinceQ 工作管理
 
-通过 PrinceQ 本机 HTTP API 管理任务、目标和个人设置。API 默认 `http://127.0.0.1:28642`；外部 Agent 可用 `PWQ_API_BASE` 或客户端 `--base` 指定可达地址。客户端位于本 Skill 的 `scripts/pwq_client.py`，使用 Python 标准库，不依赖厂商 SDK。不要直接改 SQLite、任务文件或习惯文件。
+通过 PrinceQ 本机 HTTP API 管理任务、目标和个人设置。API 默认 `http://127.0.0.1:28642`；外部 Agent 可用 `PWQ_API_BASE` 或客户端 `--base` 指定可达地址。客户端位于本 Skill 的 `scripts/pwq_client.py`，使用 Python 标准库，不依赖厂商 SDK。Windows 使用 `py -3` 或 Python 3 的 `python`，其他平台使用 `python3`；复杂 JSON 可经标准输入传给 `skill-propose --json -`，避免 shell 引号差异。不要直接改 SQLite、任务文件或习惯文件。
 
 ## 两种调用方式
 

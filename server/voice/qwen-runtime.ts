@@ -1,3 +1,7 @@
+import {StringDecoder} from 'node:string_decoder';
+import {ROOT_DIR} from '../config.ts';
+import {buildCliEnv, runCli} from '../agent/cli-exec.ts';
+import {resolveCliLaunch, terminateProcessTree, trackRuntimeProcess} from '../lib/process-launch.ts';
 import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import fs from 'node:fs';
@@ -10,7 +14,9 @@ type Pending = {child: ChildProcessWithoutNullStreams; resolve: (value: WorkerRe
 type RequestOptions = {signal?: AbortSignal; timeoutMs?: number};
 
 const workerPath = fileURLToPath(new URL('./qwen_worker.py', import.meta.url));
-let worker: ChildProcessWithoutNullStreams | null = null;
+const workers = new Map<string, ChildProcessWithoutNullStreams>();
+type VoiceOperation = 'transcribe' | 'synthesize';
+export const voiceBackend = (): string => process.env.PWQ_VOICE_BACKEND?.trim() || (process.platform === 'darwin' && process.arch === 'arm64' ? 'mlx' : 'torch');
 const pending = new Map<string, Pending>();
 let activeRequest: Promise<WorkerResponse> | null = null;
 
@@ -20,7 +26,7 @@ function rejectWorkerRequests(child: ChildProcessWithoutNullStreams, error: Erro
     pending.delete(id);
     task.reject(error);
   }
-  if (worker===child) worker=null;
+  for (const [key, value] of workers) if (value === child) workers.delete(key);
 }
 
 async function waitForTurn(task: Promise<WorkerResponse>, signal: AbortSignal): Promise<void> {
@@ -34,42 +40,55 @@ async function waitForTurn(task: Promise<WorkerResponse>, signal: AbortSignal): 
   finally { signal.removeEventListener('abort', cancel!); }
 }
 
-function pythonPath(): string {
-  const configured = process.env.PWQ_QWEN_PYTHON?.trim();
+export function voicePythonPath(operation: VoiceOperation): string {
+  const configured = (process.env[operation === 'transcribe' ? 'PWQ_QWEN_ASR_PYTHON' : 'PWQ_QWEN_TTS_PYTHON'] ?? process.env.PWQ_QWEN_PYTHON)?.trim();
   if (configured) return configured;
-  const candidates = [
-    path.join(process.cwd(), '.voice-venv', 'bin', 'python'),
-    path.join(os.homedir(), 'Documents/ChatGPT/Jev/.voice-venv/bin/python'),
-  ];
-  return candidates.find(candidate => fs.existsSync(candidate)) ?? 'python3';
+  const directory = voiceBackend() === 'mlx' ? '.voice-venv' : operation === 'transcribe' ? '.voice-asr-venv' : '.voice-tts-venv';
+  const candidates = [path.join(ROOT_DIR, directory, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')];
+  // Preserve the existing Mac installation; fresh machines use this project's environments.
+  if (voiceBackend() === 'mlx') candidates.push(path.join(os.homedir(), 'Documents/ChatGPT/Jev/.voice-venv/bin/python'));
+  return candidates.find(candidate => fs.existsSync(candidate)) ?? (process.platform === 'win32' ? 'python' : 'python3');
 }
 
-function startWorker(): ChildProcessWithoutNullStreams {
-  if (worker && worker.exitCode === null && !worker.killed) return worker;
-  // The local model worker does not need PrinceQ Agent credentials or the
-  // parent process environment. Pass only runtime and cache settings.
-  const env: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    HOME: os.homedir(),
-    TMPDIR: process.env.TMPDIR,
-    LANG: process.env.LANG,
-    LC_ALL: process.env.LC_ALL,
-    HF_HOME: process.env.HF_HOME,
-    HF_HUB_CACHE: process.env.HF_HUB_CACHE,
-    HUGGINGFACE_HUB_CACHE: process.env.HUGGINGFACE_HUB_CACHE,
-    HF_HUB_DISABLE_IMPLICIT_TOKEN: '1',
+function voiceEnvironment(): NodeJS.ProcessEnv {
+  return {...buildCliEnv(['HF_HOME', 'HF_HUB_CACHE', 'HUGGINGFACE_HUB_CACHE']),
+    HOME: os.homedir(), PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', HF_HUB_DISABLE_IMPLICIT_TOKEN: '1',
+    PWQ_VOICE_BACKEND: voiceBackend(), PWQ_VOICE_DEVICE: process.env.PWQ_VOICE_DEVICE ?? 'cpu'};
+}
+
+export async function qwenVoiceStatus() {
+  const check = async (operation: VoiceOperation) => {
+    const result = await runCli({executable: voicePythonPath(operation), args: ['-u', workerPath, '--probe', operation],
+      cwd: ROOT_DIR, envNames: ['PWQ_VOICE_BACKEND', 'PWQ_VOICE_DEVICE', 'PYTHONUTF8'], timeoutMs: 5000, maxOutputBytes: 8192});
+    try {
+      const status = JSON.parse(result.stdout);
+      if (result.exitCode === 0 && typeof status.available === 'boolean') return {available: status.available,
+        reason: status.available ? null : String(status.reason ?? '请运行 npm run voice:setup。')};
+    } catch { /* Missing interpreter/dependencies; no model is loaded by this probe. */ }
+    return {available: false, reason: '本地语音环境尚未就绪，请在项目目录运行 npm run voice:setup。'};
   };
+  const [asr, tts] = await Promise.all([check('transcribe'), check('synthesize')]);
+  return {backend: voiceBackend(), asr, tts};
+}
+
+function startWorker(operation: VoiceOperation): ChildProcessWithoutNullStreams {
+  const key = voiceBackend() === 'mlx' ? 'mlx' : operation;
+  const existing = workers.get(key);
+  if (existing && existing.exitCode === null && !existing.killed) return existing;
+  const env = voiceEnvironment();
   const asr = process.env.PWQ_QWEN_ASR_MODEL?.trim();
   const tts = process.env.PWQ_QWEN_TTS_MODEL?.trim();
   if (asr) env.PRINCEQ_QWEN_ASR_MODEL = asr;
   if (tts) env.PRINCEQ_QWEN_TTS_MODEL = tts;
 
-  const child = spawn(pythonPath(), ['-u', workerPath], {stdio: 'pipe', env});
-  worker = child;
+  const launch = resolveCliLaunch(voicePythonPath(operation), ['-u', workerPath]);
+  const child = trackRuntimeProcess(spawn(launch.executable, launch.args, {stdio: 'pipe', env, cwd: ROOT_DIR, windowsHide: true, detached: process.platform !== 'win32'}));
+  workers.set(key, child);
+  const decoder = new StringDecoder('utf8');
   let buffer = '';
   child.stderr.on('data', chunk => process.stderr.write(`[qwen-voice] ${chunk}`));
   child.stdout.on('data', (chunk: Buffer) => {
-    buffer += chunk.toString('utf8');
+    buffer += decoder.write(chunk);
     let newline = buffer.indexOf('\n');
     while (newline >= 0) {
       const line = buffer.slice(0, newline);
@@ -90,9 +109,9 @@ function startWorker(): ChildProcessWithoutNullStreams {
   child.once('error', error => {
     rejectWorkerRequests(child, error);
   });
-  child.stdin.on('error', error => {rejectWorkerRequests(child, error);child.kill('SIGKILL');});
+  child.stdin.on('error', error => {rejectWorkerRequests(child, error);terminateProcessTree(child, 'SIGKILL');});
   child.once('exit', (code, signal) => {
-    const error = new Error(`Qwen worker exited (${signal ?? code}). Check local MLX voice dependencies.`);
+    const error = new Error(`Qwen worker exited (${signal ?? code}). 请检查本地语音依赖，或运行 npm run voice:setup。`);
     rejectWorkerRequests(child, error);
   });
   return child;
@@ -116,7 +135,7 @@ async function request(payload: Record<string, string>, options: RequestOptions 
   try {
     while (activeRequest) await waitForTurn(activeRequest, signal);
     signal.throwIfAborted();
-    const child = startWorker();
+    const child = startWorker(payload.op as VoiceOperation);
     const id = randomUUID();
     task = new Promise<WorkerResponse>((resolve, reject) => pending.set(id, {child, resolve, reject}));
     activeRequest = task;
@@ -124,7 +143,7 @@ async function request(payload: Record<string, string>, options: RequestOptions 
       // Cancelling a queued request never terminates another request's worker.
       // For active work, terminate the blocked Python operation as well as fetch.
       rejectWorkerRequests(child, signal.reason instanceof Error?signal.reason:new Error('语音处理已取消。'));
-      child.kill('SIGKILL');
+      terminateProcessTree(child, 'SIGKILL');
     };
     signal.addEventListener('abort', cancelActive, {once:true});
     child.stdin.write(`${JSON.stringify({id, ...payload})}\n`);
@@ -150,8 +169,8 @@ export async function synthesizeQwenSpeech(text: string, options?: RequestOption
 }
 
 export function stopQwenWorker(): void {
-  const child=worker;
-  if(!child)return;
-  rejectWorkerRequests(child,new Error('本地语音服务已停止。'));
-  child.kill('SIGKILL');
+  for (const child of [...workers.values()]) {
+    rejectWorkerRequests(child,new Error('本地语音服务已停止。'));
+    terminateProcessTree(child, 'SIGKILL');
+  }
 }

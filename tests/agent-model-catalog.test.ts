@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -17,13 +18,13 @@ test('Codex uses returned identifiers, filters hidden entries and removes duplic
   assert.equal(models.length,1);assert.equal(models[0].id,'custom-v2');assert.equal(models[0].is_default,true);
 });
 test('metadata discovery does not send inference or mutate runtime settings',async()=>{
-  const file=path.join(temp,'claude.sh');fs.writeFileSync(file,"#!/bin/sh\nif [ \"$1\" = '--help' ]; then printf \"  --model <model> aliases 'opus', 'sonnet'\n\"; exit 0; fi\nexit 91\n",{mode:0o755});
+  const file=nodeCli(path.join(temp,'claude'), `if(process.argv.includes('--help')) {console.log("  --model <model> aliases 'opus', 'sonnet'");} else {process.exit(91);}`);
   const cfg={...defaultRuntimeConfig(),cli_path:file};
   const catalog=await discoverRuntimeModels(cfg,'claude',true);
   assert.equal(catalog.supports_model_flag,true);assert.equal(catalog.access_verified,false);assert.deepEqual(catalog.models.map(model=>model.id),['opus','sonnet']);assert.equal(fs.existsSync(process.env.PWQ_AGENT_RUNTIME_CONFIG!),false);
 });
 test('unsupported CLI model flag has no fabricated choices',async()=>{
-  const file=path.join(temp,'no-model.sh');fs.writeFileSync(file,'#!/bin/sh\necho "no model flag"\n',{mode:0o755});
+  const file=nodeCli(path.join(temp,'no-model'), "console.log('no model flag');");
   const catalog=await discoverRuntimeModels({...defaultRuntimeConfig(),cli_path:file},'claude',true);
   assert.equal(catalog.supports_model_flag,false);assert.deepEqual(catalog.models,[]);
 });

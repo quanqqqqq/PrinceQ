@@ -1,7 +1,8 @@
+import {writeFileAtomically} from '../lib/atomic-file.ts';
 /** Connection evidence is independent of the enabled switch and never touches business data. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { AgentRuntimeConfig, AgentRuntimeProvider } from '../../shared/types.ts';
 import { agentRuntimeConfigPath } from '../config.ts';
 import { badRequest } from '../lib/errors.ts';
@@ -45,9 +46,7 @@ function saveEvidence(cfg: AgentRuntimeConfig, result: ConnectionEvidence) {
   fs.mkdirSync(path.dirname(file), {recursive: true});
   const values = {...readEvidence(), [runtimeConnectionKey(cfg)]: result};
   const recent = Object.fromEntries(Object.entries(values).sort((a,b) => b[1].checked_at.localeCompare(a[1].checked_at)).slice(0, 30));
-  const tmp = file + '.' + randomUUID() + '.tmp';
-  try { fs.writeFileSync(tmp, JSON.stringify(recent, null, 2), {mode: 0o600}); fs.renameSync(tmp, file); }
-  finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
+  writeFileAtomically(file, JSON.stringify(recent, null, 2));
 }
 /** Record real connectivity without storing conversation content. */
 export function recordAgentConnection(cfg:AgentRuntimeConfig,ok:boolean,exitCode=0) {

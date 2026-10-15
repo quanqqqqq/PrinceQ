@@ -27,7 +27,7 @@ function inspectZip(archive: Buffer): Record<string, string> {
     '    assert z.testzip() is None',
     '    json.dump({n:base64.b64encode(z.read(n)).decode("ascii") for n in z.namelist()}, sys.stdout)',
   ].join('\n');
-  return JSON.parse(execFileSync('python3', ['-c', script], {input: archive}).toString());
+  return JSON.parse(execFileSync(process.env.PWQ_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3'), ['-c', script], {input: archive}).toString());
 }
 
 test.before(async () => {
@@ -89,6 +89,7 @@ test('a checkout missing SKILL.md fails instead of offering a broken download', 
 test('symbolic links cannot include files outside the Skill directory', async () => {
   const source = fs.mkdtempSync(path.join(tempRoot, 'linked-'));
   fs.writeFileSync(path.join(source, 'SKILL.md'), 'skill');
-  fs.symlinkSync(path.join(tempRoot, 'runtime.json'), path.join(source, 'external.json'));
+  const outside=path.join(tempRoot,'outside');fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(source, 'external'), process.platform==='win32'?'junction':'dir');
   await assert.rejects(buildPrinceQSkillArchive(source), /symbolic link/);
 });

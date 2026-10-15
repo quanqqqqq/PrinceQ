@@ -95,3 +95,5 @@ pnpm-lock.yaml
 __pycache__/
 *.py[cod]
 /.voice-venv/
+/.voice-asr-venv/
+/.voice-tts-venv/

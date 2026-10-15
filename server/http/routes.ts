@@ -4,7 +4,7 @@
  */
 import {habitInferenceStatus} from '../agent/habit-inference.ts';
 import {appendAgentProgressSummary, readAgentProgress, updateAgentProgress} from '../agent/progress.ts';
-import {synthesizeQwenSpeech, transcribeQwenAudio} from '../voice/qwen-runtime.ts';
+import {qwenVoiceStatus, synthesizeQwenSpeech, transcribeQwenAudio} from '../voice/qwen-runtime.ts';
 import { randomUUID } from 'node:crypto';
 import {discoverRuntimeModels} from '../agent/model-catalog.ts';
 import {z} from 'zod';
@@ -154,6 +154,8 @@ async function withVoiceRequest<T>(ctx: RequestContext, work: (signal: AbortSign
 export function buildRouter(dbFactory: () => Db = getDb): Router {
   const router = new Router();
   const db = () => dbFactory();
+
+  router.get('/api/agent/voice/status', () => qwenVoiceStatus());
 
   // Speech uses local Qwen models. The resulting transcript is sent through the
   // existing Agent message endpoint by the client; this route does not invoke an Agent.

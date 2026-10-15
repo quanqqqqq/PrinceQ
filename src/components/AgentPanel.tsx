@@ -40,7 +40,7 @@ import {
 import { useResource } from '@/hooks/use-resource';
 import { APP_NAME, demoTitle } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
-import { synthesizeAgentSpeech, transcribeAgentVoice } from '@/lib/agent-voice-client';
+import { checkAgentVoice, synthesizeAgentSpeech, transcribeAgentVoice } from '@/lib/agent-voice-client';
 import { VoiceSilenceDetector } from '@/lib/voice-silence-detector';
 import type { AgentMessageResponse } from '@shared/types';
 
@@ -272,7 +272,7 @@ export function AgentPanel({
   const voiceStatusId=useId();
   const voiceCanCancel=voiceStarting||voiceBusy||voiceRefining;
   const voiceDisabledReason=recording?'':voiceStarting
-    ? '正在请求麦克风权限；再次点击麦克风可取消启动。'
+    ? '正在检查语音环境并准备麦克风；再次点击可取消启动。'
     : voiceBusy
     ? `${voiceStatus || '录音已结束，正在等待识别结果。'}再次点击麦克风可断开本次识别。`
     : confirming
@@ -345,6 +345,7 @@ export function AgentPanel({
     speechAbortRef.current?.abort();speechAbortRef.current=controller;
     setSpeechBusy(true);setSpeechStatus('正在生成回复语音，可继续录音或输入。');
     try{
+      await checkAgentVoice('tts', controller.signal);
       const blob=await synthesizeAgentSpeech(result,controller.signal);
       if(controller.signal.aborted || generation!==speechGenerationRef.current || speechAbortRef.current!==controller)return;
       const nextUrl=URL.createObjectURL(blob);
@@ -394,6 +395,8 @@ export function AgentPanel({
       let stream:MediaStream|undefined;
       let context:AudioContext|undefined;
       try{
+        await checkAgentVoice('asr', controller.signal);
+        if(controller.signal.aborted || generation!==voiceGenerationRef.current)return;
         stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
         if(controller.signal.aborted || generation!==voiceGenerationRef.current){stream.getTracks().forEach(track=>track.stop());return;}
         context=new AudioContext();

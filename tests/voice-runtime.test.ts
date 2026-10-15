@@ -1,3 +1,4 @@
+import {nodeCli} from './fixtures/cli.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,10 +12,8 @@ import {readJsonBody, sendError, sendJson} from '../server/http/router.ts';
 
 test('voice cancellation and timeouts release the shared worker queue', async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'princeq-voice-test-'));
-  const executable=path.join(root,'fake-qwen');
   const started=path.join(root,'started');
-  fs.writeFileSync(executable,`#!${process.execPath}
-const fs=require('node:fs');
+  const executable=nodeCli(path.join(root,'fake-qwen'),`const fs=require('node:fs');
 const readline=require('node:readline');
 readline.createInterface({input:process.stdin}).on('line',line=>{
   const request=JSON.parse(line);
@@ -23,7 +22,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   const reply=()=>process.stdout.write(JSON.stringify({id:request.id,ok:true,text:'recognized',audio_base64:'audio'})+'\\n');
   if(request.audio_base64==='slow')setTimeout(reply,100);else reply();
 });
-`,{mode:0o755});
+`);
   const previous=process.env.PWQ_QWEN_PYTHON;
   process.env.PWQ_QWEN_PYTHON=executable;
   t.after(()=>{

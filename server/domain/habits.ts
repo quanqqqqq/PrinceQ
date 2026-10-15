@@ -1,3 +1,4 @@
+import {writeFileAtomically} from '../lib/atomic-file.ts';
 /**
  * Habit files live in `habits/` inside the repository so the Skill/Agent can read
  * them directly on every call. Four separate concerns, four files:
@@ -207,18 +208,7 @@ export function writeHabitFile<N extends HabitFileName>(
   if (!parsed.success) {
     throw badRequest(`Refusing to write habits/${name}.json — invalid payload`, parsed.error.issues);
   }
-  fs.mkdirSync(HABITS_DIR, { recursive: true });
-  const target = filePath(name);
-  const temp = `${target}.${process.pid}.tmp`;
-  const body = `${JSON.stringify(parsed.data, null, 2)}\n`;
-  const fd = fs.openSync(temp, 'w');
-  try {
-    fs.writeFileSync(fd, body);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  fs.renameSync(temp, target);
+  writeFileAtomically(filePath(name), `${JSON.stringify(parsed.data, null, 2)}\n`);
   return parsed.data as z.infer<(typeof SCHEMAS)[N]>;
 }
 

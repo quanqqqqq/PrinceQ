@@ -45,6 +45,7 @@
     const result={kind:'answer',headline:'模拟助手答复',answer:'模拟助手答复',reasoning:[],blocks:[],pending_action:null,matched_command:null,mode:'deterministic-local'};
     const json=value=>new Response(JSON.stringify(value),{status:200,headers:{'Content-Type':'application/json'}});
     window.fetch=async(url,options={})=>{
+      if(String(url).endsWith('/voice/status'))return json({backend:'fixture',asr:{available:true,reason:null},tts:{available:true,reason:null}});
       if(String(url).endsWith('/voice/transcribe')||String(url).endsWith('/voice/synthesize')){
         return new Promise(resolve=>{
           requests.push({kind:String(url).endsWith('/transcribe')?'asr':'tts',signal:options.signal,resolve});

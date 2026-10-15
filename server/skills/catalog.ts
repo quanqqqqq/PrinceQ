@@ -30,7 +30,7 @@ export const SKILL_OPERATIONS: OperationDefinition[] = [
   {name:'rescoring.cancel',label:'取消复评',method:'POST',path:'/api/rescoring-requests/:id/cancel',target:'rescoring',schema:empty},
   {name:'goal.create',label:'新建目标',method:'POST',path:'/api/goals',schema:S.createGoalSchema.strict()},
   {name:'goal.update',label:'编辑目标',method:'PATCH',path:'/api/goals/:id',target:'goal',schema:S.updateGoalSchema.strict()},
-  {name:'goal.delete',label:'永久删除目标（保留并解除关联任务）',method:'DELETE',path:'/api/goals/:id',target:'goal',schema:deleteBody},
+  {name:'goal.delete',label:'永久删除目标及其所有关联任务',method:'DELETE',path:'/api/goals/:id',target:'goal',schema:deleteBody},
   {name:'goal.decomposition.confirm',label:'创建选定的目标拆分任务',method:'POST',path:'/api/goals/:id/decomposition/confirm',target:'goal',schema:S.confirmDecompositionSchema.strict()},
   {name:'queue.recalculate',label:'重新计算工作队列',method:'POST',path:'/api/queue/recalculate',schema:S.recalculateSchema.strict()},
   {name:'settings.conversion.update',label:'修改耗时换算',method:'POST',path:'/api/settings/conversion',target:'settings',schema:S.settingsConversionSchema.strict(),fileWrite:true},
@@ -73,7 +73,8 @@ export function skillCatalog() {
 function fingerprint(db:Db,resource:Resource,id:string):string {
   if (resource==='settings') return JSON.stringify(buildSettingsSnapshot().versions);
   if (resource==='task') {const task=findTask(db,id);if(!task) throw notFound('任务已不存在');return JSON.stringify({version:task.version,depends_on:task.depends_on,blocks:task.blocks});}
-  if (resource==='goal') {const goal=findGoal(db,id);if(!goal) throw notFound('目标已不存在');return JSON.stringify({version:goal.version,tasks:all<Row>(db,'SELECT id, version FROM tasks WHERE goal_id = ? ORDER BY id',[id])});}
+  // Invalidate previews created under the old preserve-tasks deletion policy.
+  if (resource==='goal') {const goal=findGoal(db,id);if(!goal) throw notFound('目标已不存在');return JSON.stringify({deletion_policy:'cascade_tasks',version:goal.version,tasks:all<Row>(db,'SELECT id, version FROM tasks WHERE goal_id = ? ORDER BY id',[id])});}
   if (resource==='rescoring') {const row=get<Row>(db,'SELECT * FROM rescoring_requests WHERE id = ?',[id]);if(!row)throw notFound('复评请求已不存在');return JSON.stringify(row);}
   const row=get<Row>(db,'SELECT * FROM pending_previews WHERE token = ?',[id]);if(!row) throw notFound('目标拆分预览已不存在');return JSON.stringify(row);
 }
@@ -142,9 +143,9 @@ export function describeSkillOperation(db:Db,call:SkillOperation):string {
     if(task.depends_on.length||task.blocks.length)fields.push('解除依赖关联：'+[...new Set([...task.depends_on,...task.blocks])].map(id=>findTask(db,id)?.title??id).join('、'));
   }
   if(call.operation==='goal.delete') {
-    fields.push('永久删除该目标；关联任务全部保留并解除目标关联。');
-    const retained=listTasks(db,{goal_id:call.target_id});
-    fields.push(`保留 ${retained.length} 个任务${retained.length?'：'+retained.map(task=>displayDemoText(task.title,task.is_demo)).join('、'):''}`);
+    fields.push('永久删除该目标及其所有关联任务（包括已完成、已归档的任务），同时清理相关领取记录、依赖和复评记录；此操作无法撤销。');
+    const linked=listTasks(db,{goal_id:call.target_id});
+    fields.push(`删除 ${linked.length} 个关联任务${linked.length?'：'+linked.map(task=>displayDemoText(task.title,task.is_demo)).join('、'):''}`);
   }
   return `${def.label}${title?'：'+title:''}${fields.length?'\n'+fields.join('\n'):''}`;
 }

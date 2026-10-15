@@ -42,11 +42,11 @@ python3 /path/to/personal-work-queue/scripts/pwq_client.py skill-confirm pa_TOKE
 | settings.inferred.enabled / adopt | 推断习惯启停、采纳 |
 | settings.weights.save | 偏好类型、时段、排序权重 |
 
-路径参数使用 target_id，具体字段和枚举从 manifest 的 payload_schema 获取；nullable 字段填 null 清空。不能直接给 status 改任务，须走状态机。新目标先确认取得 ID，再批量创建关联任务。task.create 支持 description、goal_id、deadline、estimated_minutes、duration_value/unit、task_type、cognitive_load、manual_priority、matrix_score、depends_on。
+路径参数使用 target_id，具体字段和枚举从 manifest 的 payload_schema 获取；nullable 字段填 null 清空。不能直接给 status 改任务，须走状态机。外部 Skill 客户端新建目标后需先确认取得 ID，再批量创建关联任务；PrinceQ embedded Agent 可用 `create_goal_with_tasks` 把新目标与第一批任务放入同一份确认预览。task.create 支持 description、goal_id、deadline、estimated_minutes、duration_value/unit、task_type、cognitive_load、manual_priority、matrix_score、depends_on。
 
 预览自动绑定任务/目标版本与依赖、拆分/复评状态；数据改变后确认拒绝，旧预览仍未执行。批量任务/目标操作的 SQL、队列、日志和预览状态在同一事务中，失败全部回滚。个人设置使用已有版本检查与原子文件写入，单独确认；文件写与 SQLite 之间没有跨存储事务保证。
 
-永久删除任务同时移除该任务的领取、依赖、复评和队列关联；其他任务保留。永久删除目标保留任务并解除目标关联。需保留历史和恢复能力时按用户意图归档任务或把目标置为 dropped。
+永久删除任务同时移除该任务的领取、依赖、复评和队列关联；其他任务保留。永久删除目标同时删除所有关联任务（包括已完成、已归档任务）及这些任务的领取、依赖、复评和队列关联；其他目标的任务和无目标任务保留。需保留历史和恢复能力时按用户意图归档任务或把目标置为 dropped。
 
 ## 分发与鉴权预留
 

@@ -46,6 +46,10 @@ export interface RunCliOptions {
    * 缺省时只继承通用基础变量——探测（detect）不挑 provider。
    */
   provider?: AgentRuntimeConfig['provider'];
+  /** Signals that the child has emitted its first stdout bytes without exposing their contents. */
+  onFirstStdout?: () => void;
+  /** Receives raw stdout chunks so callers can parse selected safe streaming fields. */
+  onStdoutChunk?: (chunk: Buffer) => void;
 }
 
 /**
@@ -178,7 +182,15 @@ export function runCli(opts: RunCliOptions): Promise<ExecResult> {
 
     const out = sink();
     const err = sink();
-    child.stdout?.on('data', (chunk: Buffer) => out.push(chunk));
+    let sawStdout = false;
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (!sawStdout) {
+        sawStdout = true;
+        opts.onFirstStdout?.();
+      }
+      opts.onStdoutChunk?.(chunk);
+      out.push(chunk);
+    });
     child.stderr?.on('data', (chunk: Buffer) => err.push(chunk));
 
     let killTimer: NodeJS.Timeout | null = null;
@@ -245,6 +257,7 @@ const CLAUDE_OWNED_FLAGS = new Set([
   '-p',
   '--print',
   '--output-format',
+  '--include-partial-messages',
   '--tools',
   '--model',
   '--safe-mode',
@@ -307,10 +320,9 @@ function dropConflictingArgs(args: string[], provider: AgentRuntimeConfig['provi
  * 即便 prompt 里有空格、换行、引号，也不会被切成多个参数。
  *
  * 参数全部来自本机真实 help 的实测结论（Claude 2.1.274 / Codex 0.162）：
- * - claude：`-p <prompt> --tools '' --output-format text`。`-p/--print` 即非交互；
- *   `--tools ''` 禁用全部工具，模型只说话；`--output-format text` 让 stdout 就是模型的
- *   原始文本。当前本机 help 已确认支持 safe-mode/no-session-persistence；本轮实测
- *   关闭定制与会话写入后能正常退出。模型与认证仍使用本机配置，不改全局设置。
+ * - claude：`-p <prompt> --tools ''`。`-p/--print` 即非交互；`--tools ''` 禁用全部工具。
+ *   Agent 请求启用 stream-json/partial messages，只供 UI 流式展示受控的 SUMMARY 前缀；
+ *   连通性探测继续用 text。模型与认证仍使用本机配置，不改全局设置。
  * - codex：`exec --sandbox read-only --ephemeral --skip-git-repo-check --color never
  *   <prompt>`。`exec` 本身即非交互；`--sandbox read-only` 让它不为写盘/审批卡住；
  *   绝不用 `-a`/`--ask-for-approval`。
@@ -319,7 +331,7 @@ export function buildProviderPromptArgs(
   provider: AgentRuntimeConfig['provider'],
   promptText: string,
   cfg: Pick<AgentRuntimeConfig, 'model' | 'args'>,
-  options: {systemPrompt?: string; systemPromptFile?: string; promptViaStdin?: boolean} = {},
+  options: {systemPrompt?: string; systemPromptFile?: string; promptViaStdin?: boolean; streamingSummary?: boolean} = {},
 ): string[] {
   const model = cfg.model ? ['--model', cfg.model] : [];
   const extra = dropConflictingArgs(cfg.args ?? [], provider);
@@ -351,7 +363,8 @@ export function buildProviderPromptArgs(
     '--tools',
     '',
     '--output-format',
-    'text',
+    options.streamingSummary ? 'stream-json' : 'text',
+    ...(options.streamingSummary ? ['--include-partial-messages'] : []),
     '--safe-mode',
     '--no-session-persistence',
     ...(options.systemPromptFile ? ['--system-prompt-file', options.systemPromptFile] : options.systemPrompt ? ['--system-prompt', options.systemPrompt] : []),

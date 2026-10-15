@@ -3,6 +3,8 @@
  * Reference: docs/local-api.md (kept in sync with this file).
  */
 import {habitInferenceStatus} from '../agent/habit-inference.ts';
+import {appendAgentProgressSummary, readAgentProgress, updateAgentProgress} from '../agent/progress.ts';
+import {synthesizeQwenSpeech, transcribeQwenAudio} from '../voice/qwen-runtime.ts';
 import { randomUUID } from 'node:crypto';
 import {discoverRuntimeModels} from '../agent/model-catalog.ts';
 import {z} from 'zod';
@@ -11,6 +13,7 @@ import {skillCatalog, skillOperationSchema, definitionFor, operationPath, type S
 import {authorizePrinceQRequest} from '../skills/access.ts';
 import {buildPrinceQContext} from '../agent/prompt-context.ts';
 import {readInjectedPrinceQSkill} from '../skills/injection.ts';
+import {buildPrinceQSkillArchive, PRINCEQ_SKILL_ARCHIVE_NAME} from '../skills/archive.ts';
 import {savePendingActions} from '../agent/pending-actions.ts';
 import {describePendingAction} from '../agent/preview-description.ts';
 import type {
@@ -138,9 +141,40 @@ const rehydrateTask =
   (task: Task): Task =>
     findTask(database, task.id) ?? task;
 
+async function withVoiceRequest<T>(ctx: RequestContext, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller=new AbortController();
+  const cancel=()=>{if(!ctx.res.writableEnded)controller.abort();};
+  ctx.res.once('close',cancel);
+  ctx.req.once('aborted',cancel);
+  if(ctx.res.destroyed || ctx.req.aborted)controller.abort();
+  try{return await work(controller.signal);}
+  finally{ctx.res.off('close',cancel);ctx.req.off('aborted',cancel);}
+}
+
 export function buildRouter(dbFactory: () => Db = getDb): Router {
   const router = new Router();
   const db = () => dbFactory();
+
+  // Speech uses local Qwen models. The resulting transcript is sent through the
+  // existing Agent message endpoint by the client; this route does not invoke an Agent.
+  router.post('/api/agent/voice/transcribe', async (ctx) => {
+    const body = z.object({audio_base64: z.string().min(1).max(11_200_000)}).parse(ctx.body);
+    return withVoiceRequest(ctx, async signal=>({text: await transcribeQwenAudio(body.audio_base64,{signal})}));
+  });
+  router.post('/api/agent/voice/synthesize', async (ctx) => {
+    const body = z.object({text: z.string().trim().min(1).max(2000)}).parse(ctx.body);
+    return withVoiceRequest(ctx, async signal=>({audio_base64: await synthesizeQwenSpeech(body.text,{signal}), mime_type: 'audio/wav'}));
+  });
+  router.get('/api/agent/progress/:id', (ctx) => {
+    const requestId = z.string().uuid().parse(ctx.params.id);
+    return readAgentProgress(requestId) ?? {
+      request_id: requestId,
+      phase: 'checking' as const,
+      message: '正在启动 Agent 进度跟踪',
+      started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  });
 
   // ── health ────────────────────────────────────────────────────────────────
   router.get('/api/health', (): HealthResponse => {
@@ -518,7 +552,7 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
     const body=parse(z.strictObject({expected_version:z.number().int().positive().optional()}),ctx.body);
     const outcome=withOperation(db(),{idempotency_key:keyFor(ctx,'goal-delete'),operation_type:'goal.delete',target_type:'goal',actor_id:DEFAULT_ACTOR_ID},()=>{
       const result=deleteGoal(db(),ctx.params.id,body.expected_version);
-      return {result,target_id:ctx.params.id,summary:`永久删除目标「${result.title}」；保留 ${result.retained_task_ids.length} 个任务`,detail:result};
+      return {result,target_id:ctx.params.id,summary:`永久删除目标「${result.title}」及 ${result.deleted_task_ids.length} 个关联任务`,detail:result};
     });
     return {...outcome.result,operation:outcome.operation,replayed:outcome.replayed};
   });
@@ -1121,6 +1155,17 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
     if(result instanceof Promise)throw new Error('PrinceQ mutation handlers must be synchronous');
     return result;
   };
+  router.get('/api/skills/princeq/download', async ctx => {
+    authorizePrinceQRequest(ctx, 'read');
+    const archive = await buildPrinceQSkillArchive();
+    ctx.res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${PRINCEQ_SKILL_ARCHIVE_NAME}"`,
+      'Content-Length': archive.length,
+      'Cache-Control': 'no-store',
+    });
+    ctx.res.end(archive);
+  });
   router.get('/api/skills/princeq',ctx=>{authorizePrinceQRequest(ctx,'read');return {...skillCatalog(),skill:readInjectedPrinceQSkill()};});
   router.get('/api/skills/princeq/context',ctx=>{
     const principal=authorizePrinceQRequest(ctx,'read');
@@ -1181,6 +1226,9 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
    */
   router.post('/api/agent/message', async (ctx) => {
     const body = parse(S.agentMessageSchema, ctx.body);
+    const progressId = body.progress_id;
+    updateAgentProgress(progressId, 'checking');
+    try {
     const database = db();
     const session = ensureSession(database, body.session_id, body.message);
     const request = {
@@ -1238,7 +1286,14 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
 
     const runAgent = async () => {
       try {
-        const llm = await runAgentMessage(request, cfg, { sessionId: session.id });
+        const llm = await runAgentMessage(request, cfg, {
+          sessionId: session.id,
+          onProgress: (phase) => updateAgentProgress(progressId, phase),
+          onSummary: (delta) => {
+            updateAgentProgress(progressId, 'response');
+            appendAgentProgressSummary(progressId, delta);
+          },
+        });
         return {
           outcome: { result: llm.result, invalidates: llm.invalidates },
           mode: llm.mode,
@@ -1273,6 +1328,7 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
             ? await runAgent()
             : viaCommand('deterministic-local', notReadyReason(cfg));
 
+    updateAgentProgress(progressId, chosen.source === 'agent-error' ? 'failed' : 'complete');
     const messages = persistExchange(database, session.id, body.message, chosen.outcome);
     return {
       session: sessionPayload(database, session.id),
@@ -1285,6 +1341,10 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
       fallback_reason: chosen.fallbackReason,
       available_actions: chosen.availableActions,
     };
+    } catch (error) {
+      updateAgentProgress(progressId, 'failed');
+      throw error;
+    }
   });
 
   // ── 本地 CLI Agent 运行时：配置 / 测试 / 状态 ───────────────────────────────
@@ -1378,6 +1438,9 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
       keyFor(ctx, 'preview-confirm'),
       (call,index)=>executeSkillOperation(ctx,call,index,body.token),
     );
+    const createdGoals = applied.createdGoalIds
+      .map(id => findGoal(database, id))
+      .filter((goal): goal is NonNullable<typeof goal> => goal !== null);
     const outcome = {
       result: {
         kind: 'applied' as const,
@@ -1385,20 +1448,28 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
         answer: [`已处理：${applied.summary}`, ...applied.notes].join('\n'),
         reasoning: [
           '动作由确定性服务执行，模型全程没有写库权限。',
+          applied.createdGoalIds.length
+            ? `新建了 ${applied.createdGoalIds.length} 个目标。`
+            : '没有新建目标。',
           applied.createdTaskIds.length
             ? `新建了 ${applied.createdTaskIds.length} 个任务。`
             : '没有新建任务。',
           ...applied.notes,
         ],
-        blocks: applied.createdTaskIds.length
-          ? [
+        blocks: [
+          ...(createdGoals.length ? [{
+            type: 'facts' as const,
+            title: '新建目标',
+            items: createdGoals.map(goal => ({label: '目标', value: goal.title})),
+          }] : []),
+          ...(applied.createdTaskIds.length ? [
               {
                 type: 'tasks' as const,
-                title: 'Created tasks',
+                title: '新建任务',
                 task_ids: applied.createdTaskIds,
               },
-            ]
-          : [],
+            ] : []),
+        ],
         pending_action: null,
         matched_command: null,
         mode: 'agent' as const,

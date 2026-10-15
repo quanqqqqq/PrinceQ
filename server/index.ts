@@ -7,9 +7,11 @@ import http from 'node:http';
 import { API_HOST, API_PORT } from './config.ts';
 import { getDb } from './db/connection.ts';
 import {startHabitInferenceWorker} from './agent/habit-inference.ts';
+import {stopQwenWorker} from './voice/qwen-runtime.ts';
 import { buildRouter, STREAMING_PATHS } from './http/routes.ts';
 import {
   applyCors,
+  MAX_VOICE_BODY_BYTES,
   readJsonBody,
   sendError,
   sendJson,
@@ -51,20 +53,20 @@ export function createServer(): http.Server {
         res,
         url,
         params: matched.params,
-        body: await readJsonBody(req),
+        body: await readJsonBody(req, url.pathname.startsWith('/api/agent/voice/') ? MAX_VOICE_BODY_BYTES : undefined),
         idempotencyKey: (req.headers['idempotency-key'] as string | undefined)?.trim() || null,
       };
       const payload = await matched.handler(ctx);
-      // SSE handlers write their own response.
-      if (STREAMING_PATHS.has(url.pathname)) return;
-      sendJson(res, req.method === 'POST' ? 200 : 200, payload ?? null);
+      // SSE and file-download handlers write their own response.
+      if (res.writableEnded || STREAMING_PATHS.has(url.pathname)) return;
+      if(!res.destroyed)sendJson(res, 200, payload ?? null);
     } catch (error) {
-      sendError(res, error);
+      if(!res.destroyed)sendError(res, error);
     }
   });
   let stopObservation: (() => void) | null = null;
   server.once('listening', () => { stopObservation = startHabitInferenceWorker(getDb()); });
-  server.once('close', () => stopObservation?.());
+  server.once('close', () => { stopObservation?.(); stopQwenWorker(); });
   return server;
 }
 

@@ -67,6 +67,97 @@ async function call(
 const createTask = (title: string, key: string, extra: Record<string, unknown> = {}) =>
   call('POST', '/api/tasks', { title, ...extra }, key);
 
+test('DELETE goal removes all linked tasks and their records, preserves unrelated tasks, and replays once', async () => {
+  const goal = (await call('POST', '/api/goals', { title: '删除测试目标' }, 'delete-goal-create')).body.goal;
+  const otherGoal = (await call('POST', '/api/goals', { title: '保留目标' }, 'delete-other-goal')).body.goal;
+  const task = (await createTask('领取中的关联任务', 'delete-goal-task-create', { goal_id: goal.id })).body.task;
+  const archived = (await createTask('归档的关联任务', 'delete-goal-archived', { goal_id: goal.id })).body.task;
+  const completed = (await createTask('已完成的关联任务', 'delete-goal-completed', { goal_id: goal.id })).body.task;
+  const other = (await createTask('其他目标的任务', 'delete-goal-other', { goal_id: otherGoal.id })).body.task;
+  const independent = (await createTask('独立任务', 'delete-goal-independent')).body.task;
+  await call('POST', `/api/tasks/${task.id}/actions`, { action: 'claim' }, 'delete-goal-claim');
+  assert.equal((await call('POST', `/api/tasks/${archived.id}/actions`, { action: 'archive' }, 'delete-goal-archive')).status, 200);
+  await call('POST', `/api/tasks/${completed.id}/actions`, { action: 'claim' }, 'delete-goal-completed-claim');
+  await call('POST', `/api/tasks/${completed.id}/actions`, { action: 'start' }, 'delete-goal-completed-start');
+  assert.equal((await call('POST', `/api/tasks/${completed.id}/actions`, { action: 'complete' }, 'delete-goal-complete')).status, 200);
+  await call('POST', `/api/tasks/${other.id}/dependencies`, { depends_on_id: task.id }, 'delete-goal-dep');
+  assert.equal((await call('POST', `/api/tasks/${task.id}/rescoring-request`, { changed_axes: ['importance'] }, 'delete-goal-rescoring')).status, 200);
+  for (const table of ['task_assignments', 'rescoring_requests', 'queue_entries']) {
+    assert.ok(Number(getDb().prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE task_id = ?`).get(task.id)!.count) > 0);
+  }
+  const before = (await call('GET', `/api/tasks/${other.id}`)).body.task;
+  const deleted = await call('DELETE', `/api/goals/${goal.id}`, { expected_version: goal.version }, 'delete-goal');
+  assert.equal(deleted.status, 200);
+  const deletedIds = [task.id, archived.id, completed.id].sort();
+  assert.deepEqual(deleted.body.deleted_task_ids, deletedIds);
+  assert.equal((await call('GET', `/api/goals/${goal.id}`)).status, 404);
+  for (const id of deletedIds) {
+    assert.equal((await call('GET', `/api/tasks/${id}`)).status, 404);
+    for (const table of ['task_assignments', 'rescoring_requests', 'queue_entries']) {
+      assert.equal(getDb().prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE task_id = ?`).get(id)!.count, 0);
+    }
+    assert.equal(getDb().prepare('SELECT COUNT(*) AS count FROM task_dependencies WHERE task_id = ? OR depends_on_id = ?').get(id, id)!.count, 0);
+  }
+  const after = (await call('GET', `/api/tasks/${other.id}`)).body.task;
+  assert.equal(after.goal_id, otherGoal.id);
+  assert.equal(after.title, before.title);
+  assert.deepEqual(after.depends_on, []);
+  assert.equal(after.version, before.version + 1);
+  assert.equal((await call('GET', `/api/tasks/${independent.id}`)).status, 200);
+  const queue = (await call('GET', '/api/queue')).body;
+  assert.ok(queue.entries.every((entry: { task: { id: string } }) => !deletedIds.includes(entry.task.id)));
+  const replay = await call('DELETE', `/api/goals/${goal.id}`, { expected_version: goal.version }, 'delete-goal');
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.replayed, true);
+  assert.deepEqual(replay.body.deleted_task_ids, deletedIds);
+  assert.equal((await call('GET', `/api/tasks/${other.id}`)).body.task.version, after.version);
+});
+
+test('DELETE empty goal returns no deleted task IDs', async () => {
+  const goal = (await call('POST', '/api/goals', { title: '空目标' }, 'delete-empty-goal-create')).body.goal;
+  const deleted = await call('DELETE', `/api/goals/${goal.id}`, { expected_version: goal.version }, 'delete-empty-goal');
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.body.deleted_task_ids, []);
+});
+
+test('DELETE task removes dependencies and queue entry, preserves neighbours, and replays', async () => {
+  const first = (await createTask('删除的前置任务', 'delete-task-first')).body.task;
+  const second = (await createTask('保留的后续任务', 'delete-task-second')).body.task;
+  await call('POST', `/api/tasks/${second.id}/dependencies`, { depends_on_id: first.id }, 'delete-task-dep');
+  const before = (await call('GET', `/api/tasks/${second.id}`)).body.task;
+  const target = (await call('GET', `/api/tasks/${first.id}`)).body.task;
+  assert.equal(before.dependency_ready, false);
+  const deleted = await call('DELETE', `/api/tasks/${first.id}`, { expected_version: target.version }, 'delete-task');
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.body.removed_dependency_task_ids, [second.id]);
+  assert.equal((await call('GET', `/api/tasks/${first.id}`)).status, 404);
+  const after = (await call('GET', `/api/tasks/${second.id}`)).body.task;
+  assert.equal(after.title, before.title);
+  assert.deepEqual(after.depends_on, []);
+  assert.equal(after.dependency_ready, true);
+  assert.equal(after.version, before.version + 1);
+  const queue = (await call('GET', '/api/queue')).body;
+  assert.ok(!queue.entries.some((entry: { task: { id: string } }) => entry.task.id === first.id));
+  assert.ok(queue.entries.some((entry: { task: { id: string } }) => entry.task.id === second.id));
+  const replay = await call('DELETE', `/api/tasks/${first.id}`, { expected_version: target.version }, 'delete-task');
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.replayed, true);
+  assert.equal((await call('GET', `/api/tasks/${second.id}`)).body.task.version, after.version);
+});
+
+test('DELETE refuses stale versions and keeps both goals and tasks intact', async () => {
+  const goal = (await call('POST', '/api/goals', { title: '版本冲突目标' }, 'delete-conflict-goal')).body.goal;
+  const task = (await createTask('版本冲突任务', 'delete-conflict-task', { goal_id: goal.id })).body.task;
+  await call('PATCH', `/api/goals/${goal.id}`, { title: '已更新目标', expected_version: goal.version }, 'delete-conflict-goal-edit');
+  await call('PATCH', `/api/tasks/${task.id}`, { title: '已更新任务', expected_version: task.version }, 'delete-conflict-task-edit');
+  assert.equal((await call('DELETE', `/api/goals/${goal.id}`, { expected_version: goal.version }, 'delete-conflict-goal-attempt')).status, 409);
+  assert.equal((await call('DELETE', `/api/tasks/${task.id}`, { expected_version: task.version }, 'delete-conflict-task-attempt')).status, 409);
+  assert.equal((await call('GET', `/api/goals/${goal.id}`)).body.goal.title, '已更新目标');
+  const kept = (await call('GET', `/api/tasks/${task.id}`)).body.task;
+  assert.equal(kept.title, '已更新任务');
+  assert.equal(kept.goal_id, goal.id);
+});
+
 test('health reports deterministic-local mode and a reachable database', async () => {
   const { status, body } = await call('GET', '/api/health');
 

@@ -18,6 +18,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { ScoreBreakdownPanel } from '@/components/ScoreBreakdownPanel';
 import { Textarea } from '@/components/ui/textarea';
+import { AgentSummary } from '@/components/AgentSummary';
 import {
   agentBlockTitle,
   agentCommandLabel,
@@ -195,7 +196,7 @@ export function AgentResultView({
       <div className="flex items-start gap-2">
         <Icon className={cn('mt-0.5 size-4 shrink-0', meta.className)} />
         <div className="min-w-0 flex-1">
-          <p className="whitespace-pre-wrap break-words text-sm font-medium text-foreground">
+          <p className="whitespace-pre-wrap break-words text-[14px] leading-7 text-foreground">
             {result.answer ?? translateSystemText(result.headline)}
           </p>
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
@@ -212,6 +213,24 @@ export function AgentResultView({
       </div>
 
       <AgentWarnings warnings={result.warnings} />
+
+      {result.summary?.length ? (
+        <div className="rounded-xl border border-primary/15 bg-primary/[0.035] px-3 py-2.5">
+          <p className="mb-1 text-[11px] font-semibold tracking-wide text-primary">处理摘要</p>
+          <AgentSummary key={result.summary.join('\n')} text={result.summary.join('\n')} />
+        </div>
+      ) : null}
+
+      {result.kind !== 'error' && result.reasoning.length > 0 ? (
+        <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
+          <p className="text-xs font-medium text-foreground">结果说明</p>
+          <ul className="mt-1 space-y-1">
+            {result.reasoning.map((item,index)=>(
+              <li key={index} className="text-xs text-muted-foreground">· {translateSystemText(item)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {result.kind === 'error' && result.reasoning.length > 0 ? (
         <p role="alert" className="whitespace-pre-wrap text-xs text-destructive">
@@ -298,7 +317,7 @@ export function AgentResultView({
             {block.type === 'list' ? (
               <ul className="mt-1.5 space-y-1">
                 {block.items.map((item, itemIndex) => (
-                  <li key={itemIndex} className="text-xs text-muted-foreground">
+                  <li key={itemIndex} className="whitespace-pre-line text-xs text-muted-foreground">
                     · {translateSystemText(item)}
                   </li>
                 ))}

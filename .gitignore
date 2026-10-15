@@ -94,3 +94,4 @@ pnpm-lock.yaml
 # Python caches
 __pycache__/
 *.py[cod]
+/.voice-venv/

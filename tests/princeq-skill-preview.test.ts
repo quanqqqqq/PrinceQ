@@ -10,7 +10,7 @@ process.env.PWQ_HABITS_DIR=path.join(temporary,'habits');
 process.env.PWQ_DB_PATH=path.join(temporary,'unused.db');
 process.env.PWQ_AGENT_RUNTIME_CONFIG=path.join(temporary,'runtime.json');
 const {freshDb}=await import('./helpers.ts');
-const {all}=await import('../server/db/connection.ts');
+const {all,run}=await import('../server/db/connection.ts');
 const {buildRouter}=await import('../server/http/routes.ts');
 const {ensureHabitFiles,updateDurationPrefs,buildSettingsSnapshot,addExplicitHabit}=await import('../server/domain/habits.ts');
 const {createTask,updateTask,addDependency}=await import('../server/repo/task-service.ts');
@@ -122,12 +122,52 @@ test('稳定 ID 可以区分同名任务，旧预览不能覆盖并发修改',as
   updateTask(db,second.id,{description:'更新的数据'});
   await assert.rejects(confirm(stale.token),rejected409);assert.equal(findTask(db,second.id)!.description,'更新的数据');
 });
-test('删除目标保留关联任务；删除任务解除依赖且其他任务保留',async()=>{
-  const goal=createGoal(db,{title:'要删除的目标'}),linked=createTask(db,{title:'保留的关联任务',goal_id:goal.id});
+test('删除目标预览明确展示所有关联任务，确认后删除且解除外部依赖',async()=>{
+  const goal=createGoal(db,{title:'要删除的目标'}),linked=createTask(db,{title:'关联任务',goal_id:goal.id});
   const dependent=createTask(db,{title:'另一任务'});addDependency(db,dependent.id,linked.id);
-  const goalPreview=await preview(operation('goal.delete',{},goal.id));await confirm(goalPreview.token);
-  assert.equal(findGoal(db,goal.id),null);assert.equal(findTask(db,linked.id)!.goal_id,null);assert.ok(findTask(db,dependent.id));
-  const taskPreview=await preview(operation('task.delete',{},linked.id));await confirm(taskPreview.token);
+  const goalPreview=await preview(operation('goal.delete',{},goal.id));
+  assert.match(goalPreview.result.blocks[0].items[0],/删除 1 个关联任务：关联任务/);
+  assert.ok(findGoal(db,goal.id));assert.ok(findTask(db,linked.id));
+  await confirm(goalPreview.token);
+  assert.equal(findGoal(db,goal.id),null);assert.equal(findTask(db,linked.id),null);
+  assert.deepEqual(findTask(db,dependent.id)!.depends_on,[]);
+});
+test('删除目标预览后增加或编辑关联任务时拒绝旧确认',async()=>{
+  const goal=createGoal(db,{title:'目标'}),linked=createTask(db,{title:'原任务',goal_id:goal.id});
+  const first=await preview(operation('goal.delete',{},goal.id));
+  const added=createTask(db,{title:'新增任务',goal_id:goal.id});
+  await assert.rejects(confirm(first.token),rejected409);
+  const second=await preview(operation('goal.delete',{},goal.id));
+  updateTask(db,linked.id,{title:'更新的任务'});
+  await assert.rejects(confirm(second.token),rejected409);
+  assert.ok(findGoal(db,goal.id));assert.ok(findTask(db,linked.id));assert.ok(findTask(db,added.id));
+});
+test('旧保留任务规则下的目标删除预览不能执行新的级联删除',async()=>{
+  const goal=createGoal(db,{title:'旧预览目标'}),linked=createTask(db,{title:'原任务',goal_id:goal.id});
+  const result=await preview(operation('goal.delete',{},goal.id));
+  const actions=result.actions;
+  const guard=actions[0].preconditions.find((g:{resource:string})=>g.resource==='goal');
+  const fingerprint=JSON.parse(guard.fingerprint);delete fingerprint.deletion_policy;
+  guard.fingerprint=JSON.stringify(fingerprint);
+  run(db,'UPDATE agent_pending_actions SET actions_json = ? WHERE token = ?',[JSON.stringify(actions),result.token]);
+  await assert.rejects(confirm(result.token),rejected409);
+  assert.ok(findGoal(db,goal.id));assert.ok(findTask(db,linked.id));
+});
+test('删除目标过程中失败时回滚目标、任务、依赖和操作记录',async()=>{
+  const goal=createGoal(db,{title:'回滚目标'}),linked=createTask(db,{title:'关联任务',goal_id:goal.id});
+  const dependent=createTask(db,{title:'保留任务'});addDependency(db,dependent.id,linked.id);
+  const result=await preview(operation('goal.delete',{},goal.id));
+  const before=all(db,'SELECT * FROM operations');
+  db.exec("CREATE TEMP TRIGGER reject_goal_delete BEFORE DELETE ON goals BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END");
+  await assert.rejects(confirm(result.token),/forced delete failure/);
+  assert.ok(findGoal(db,goal.id));assert.ok(findTask(db,linked.id));
+  assert.deepEqual(findTask(db,dependent.id)!.depends_on,[linked.id]);
+  assert.deepEqual(all(db,'SELECT * FROM operations'),before);
+});
+test('删除单个任务解除依赖且保留其他任务',async()=>{
+  const linked=createTask(db,{title:'删除任务'}),dependent=createTask(db,{title:'保留任务'});
+  addDependency(db,dependent.id,linked.id);
+  const result=await preview(operation('task.delete',{},linked.id));await confirm(result.token);
   assert.equal(findTask(db,linked.id),null);assert.deepEqual(findTask(db,dependent.id)!.depends_on,[]);
 });
 test('个人设置进入两种 CLI 的原生系统指令，更新后重新读取且不改旧任务耗时',()=>{

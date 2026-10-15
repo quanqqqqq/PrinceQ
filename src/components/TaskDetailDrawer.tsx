@@ -1,7 +1,7 @@
 /**
  * 三入口共用的任务详情抽屉（UX-06）。
  *
- * 工作队列、四象限弹窗、目标详情三处的任务卡片都带一个「详情」入口，点开这里。
+ * 工作队列、四象限弹窗、目标详情三处的任务卡片都带一个「查看」入口，点开这里。
  *
  * 行为约定：
  * - 普通字段（标题/描述/目标关联/截止/预计耗时/类型/优先级）完整显示且可编辑；
@@ -25,6 +25,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sh
 import { Textarea } from '@/components/ui/textarea';
 import { TaskDateTimeField } from '@/components/TaskDateTimeField';
 import { DurationField } from '@/components/DurationField';
+import { DeleteEntityButton } from '@/components/DeleteEntityButton';
 import { ErrorState, LoadingRows, WriteError } from '@/components/states';
 import { useMutation, useResource } from '@/hooks/use-resource';
 import { api, type TaskDetail } from '@/lib/api';
@@ -430,6 +431,12 @@ export function TaskDetailDrawer({
 
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                   <div className="flex flex-wrap items-center gap-2">
+                    <DeleteEntityButton
+                      kind="task"
+                      entity={task}
+                      disabled={save.pending !== null || !detail.current}
+                      onDeleted={() => onOpenChange(false)}
+                    />
                     {task.status === 'archived' ? (
                       <Button
                         size="sm"

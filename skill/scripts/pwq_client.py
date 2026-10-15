@@ -858,7 +858,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('token')
     s=add('delete-task',cmd_delete_task,'preview permanent task deletion')
     s.add_argument('task_id');s.add_argument('--expected-version',type=int)
-    s=add('delete-goal',cmd_delete_goal,'preview permanent goal deletion; preserve tasks')
+    s=add('delete-goal',cmd_delete_goal,'preview permanent deletion of goal and all linked tasks')
     s.add_argument('goal_id');s.add_argument('--expected-version',type=int)
     s=add('remove-dependency',cmd_remove_dependency,'preview dependency removal')
     s.add_argument('task_id');s.add_argument('depends_on_id')

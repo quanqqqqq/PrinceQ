@@ -2,7 +2,7 @@
  * `/goals` — 带进度的目标卡片，点开后是包含关联任务和拆分草稿流程的详情面板。
  */
 import { useState } from 'react';
-import type { GoalWithProgress } from '@shared/types';
+import type { AgentResult, GoalWithProgress } from '@shared/types';
 import { wallDateToIso } from '@shared/datetime';
 import { Plus, Target } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -22,9 +22,14 @@ import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
 import { GoalDateField } from '@/components/GoalDateField';
 import { GoalDetailPanel } from '@/components/GoalDetailPanel';
+import { DeleteEntityButton } from '@/components/DeleteEntityButton';
+import { AgentResultView } from '@/components/AgentResultView';
 import { EmptyState, ErrorState, LoadingRows, WriteError } from '@/components/states';
 import { useResource, useMutation } from '@/hooks/use-resource';
+import { useAgentConversation } from '@/hooks/use-agent-conversation';
 import { api } from '@/lib/api';
+import { getRuntimeStatus } from '@/lib/agent-runtime-client';
+import { buildGoalCreationMessage } from '@/lib/goal-draft-request';
 import { GOAL_STATUS_LABELS, demoText, formatDeadline, percent } from '@/lib/format';
 
 const STATUS_CLASSES: Record<GoalWithProgress['status'], string> = {
@@ -39,9 +44,23 @@ function CreateGoalDialog() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [targetDate, setTargetDate] = useState('');
+  const [planning, setPlanning] = useState(false);
+  const [planningError, setPlanningError] = useState<string | null>(null);
+  const [agentPreview, setAgentPreview] = useState<AgentResult | null>(null);
+  const [agentFollowup, setAgentFollowup] = useState('');
   const mutation = useMutation(['goals']);
+  const conversation = useAgentConversation();
 
-  const submit = async () => {
+  const resetForm = () => {
+    setTitle('');
+    setDescription('');
+    setTargetDate('');
+    setAgentPreview(null);
+    setPlanningError(null);
+    setAgentFollowup('');
+  };
+
+  const createGoalOnly = async () => {
     const trimmed = title.trim();
     if (!trimmed) return;
     const created = await mutation.run('create', () =>
@@ -52,11 +71,64 @@ function CreateGoalDialog() {
       }),
     );
     if (created) {
-      setTitle('');
-      setDescription('');
-      setTargetDate('');
+      resetForm();
       setOpen(false);
     }
+  };
+
+  const requestGoalPlan = async () => {
+    if (!title.trim() || planning) return;
+    setPlanning(true);
+    setPlanningError(null);
+    setAgentPreview(null);
+    setAgentFollowup('');
+    try {
+      const runtime = await getRuntimeStatus();
+      if (!runtime.enabled) {
+        throw new Error('请先在「个人设置 → PrinceQ 助手」启用并连接 Agent，再生成目标与任务预览。');
+      }
+      const message = buildGoalCreationMessage({
+        title,
+        description,
+        targetDate,
+      });
+      const accepted = await conversation.send(message, undefined, 'agent', undefined, {
+        preserveInput: true,
+        fromShortcut: true,
+        onReply: (reply) => setAgentPreview(reply.result),
+        onError: (cause) => setPlanningError(cause instanceof Error ? cause.message : 'Agent 生成目标预览失败。'),
+      });
+      if (!accepted) setPlanningError('助手正在处理其他操作，请完成后再生成目标预览。');
+    } catch (cause) {
+      setPlanningError(cause instanceof Error ? cause.message : '暂时无法生成目标预览，请重试。');
+    } finally {
+      setPlanning(false);
+    }
+  };
+
+  const confirmGoalPlan = async (token: string, drafts?: {index: number; title: string; description?: string | null}[]) => {
+    const confirmed = await conversation.confirm(token, drafts);
+    if (confirmed) {
+      resetForm();
+      setOpen(false);
+    }
+  };
+
+  const sendGoalFollowup = async (message: string, target?: {task_id?: string; goal_id?: string}) => {
+    setPlanning(true);
+    setPlanningError(null);
+    const accepted = await conversation.send(message, target, 'agent', undefined, {
+      preserveInput: true,
+      fromShortcut: true,
+      onReply: (reply) => setAgentPreview(reply.result),
+      onError: (cause) => setPlanningError(cause instanceof Error ? cause.message : 'Agent 处理失败。'),
+    });
+    if (!accepted) setPlanningError('助手正在处理其他操作，请完成后再继续。');
+    setPlanning(false);
+  };
+
+  const cancelGoalPlan = async (token: string) => {
+    if (await conversation.cancel(token)) setAgentPreview(null);
   };
 
   return (
@@ -71,14 +143,14 @@ function CreateGoalDialog() {
         <DialogHeader>
           <DialogTitle>新建目标</DialogTitle>
           <DialogDescription>
-            目标是一个结果，不是一条任务。创建后可在详情面板里把它拆成任务。
+            默认让 Agent 同时规划目标和第一批关联任务；预览确认后才会创建。也可以选择只建目标。
           </DialogDescription>
         </DialogHeader>
         <form
           className="space-y-3"
           onSubmit={(event) => {
             event.preventDefault();
-            void submit();
+            void requestGoalPlan();
           }}
         >
           <div className="space-y-1.5">
@@ -86,7 +158,8 @@ function CreateGoalDialog() {
             <Input
               id="goal-title"
               value={title}
-              onChange={(event) => setTitle(event.target.value)}
+              disabled={planning || Boolean(agentPreview?.pending_action)}
+              onChange={(event) => { setTitle(event.target.value); setAgentPreview(null); }}
               placeholder="例如：上线计费系统重写"
               className="bg-card! disabled:bg-muted! read-only:bg-muted!"
               autoFocus
@@ -97,7 +170,8 @@ function CreateGoalDialog() {
             <Textarea
               id="goal-description"
               value={description}
-              onChange={(event) => setDescription(event.target.value)}
+              disabled={planning || Boolean(agentPreview?.pending_action)}
+              onChange={(event) => { setDescription(event.target.value); setAgentPreview(null); }}
               placeholder="达到什么结果才算完成？"
               rows={2}
               className="bg-card! disabled:bg-muted! read-only:bg-muted!"
@@ -105,17 +179,47 @@ function CreateGoalDialog() {
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="goal-target">目标日期</Label>
-            <GoalDateField id="goal-target" value={targetDate} onChange={setTargetDate} />
+            <GoalDateField id="goal-target" value={targetDate} disabled={planning || Boolean(agentPreview?.pending_action)} onChange={(value) => { setTargetDate(value); setAgentPreview(null); }} />
           </div>
           {mutation.error ? (
             <WriteError message={mutation.error} onDismiss={mutation.clearError} />
+          ) : null}
+          {planningError ? <WriteError message={planningError} onDismiss={() => setPlanningError(null)} /> : null}
+          {agentPreview ? (
+            <AgentResultView
+              result={agentPreview}
+              onConfirm={(token, drafts) => void confirmGoalPlan(token, drafts)}
+              onCancel={(token) => void cancelGoalPlan(token)}
+              onSend={sendGoalFollowup}
+              confirming={conversation.confirming}
+              disabledTokens={conversation.disabledTokens}
+            />
+          ) : null}
+          {agentPreview?.kind === 'clarification' ? (
+            <div className="space-y-2 rounded-md border border-border bg-card p-3">
+              <Label htmlFor="goal-agent-followup">补充信息</Label>
+              <Textarea
+                id="goal-agent-followup"
+                value={agentFollowup}
+                onChange={event => setAgentFollowup(event.target.value)}
+                placeholder="回答 Agent 的追问，再继续生成目标与任务预览。"
+                rows={2}
+              />
+              <Button type="button" size="sm" disabled={!agentFollowup.trim() || planning || conversation.sending}
+                onClick={() => { const message = agentFollowup.trim(); if(message){setAgentFollowup('');void sendGoalFollowup(message);} }}>
+                {planning || conversation.sending ? 'Agent 正在处理…' : '继续生成预览'}
+              </Button>
+            </div>
           ) : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>
               取消
             </Button>
-            <Button type="submit" disabled={!title.trim() || mutation.pending !== null}>
-              {mutation.pending ? '创建中…' : '创建目标'}
+            <Button type="button" variant="outline" disabled={!title.trim() || mutation.pending !== null || planning || Boolean(agentPreview?.pending_action)} onClick={() => void createGoalOnly()}>
+              {mutation.pending ? '创建中…' : '仅创建目标'}
+            </Button>
+            <Button type="submit" disabled={!title.trim() || mutation.pending !== null || planning || Boolean(agentPreview?.pending_action)}>
+              {planning ? 'Agent 正在生成…' : '生成目标与任务预览'}
             </Button>
           </DialogFooter>
         </form>
@@ -164,9 +268,12 @@ function GoalCard({ goal, onOpen }: { goal: GoalWithProgress; onOpen: () => void
         ) : null}
       </div>
 
-      <Button size="sm" variant="outline" className="mt-3" onClick={onOpen}>
-        查看目标
-      </Button>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" onClick={onOpen}>
+          查看
+        </Button>
+        <DeleteEntityButton kind="goal" entity={goal} />
+      </div>
     </article>
   );
 }
@@ -181,7 +288,7 @@ export default function GoalsPage() {
 
   const list = goals.data.goals;
   // Keep the open panel's data fresh after a write refetches the list.
-  const current = selected ? (list.find((goal) => goal.id === selected.id) ?? selected) : null;
+  const current = selected ? (list.find((goal) => goal.id === selected.id) ?? null) : null;
 
   return (
     <div className="space-y-4">
@@ -193,7 +300,7 @@ export default function GoalsPage() {
         <EmptyState
           icon={<Target />}
           title="还没有目标"
-          description="先创建一个目标，然后在详情面板里拟出实现它所需的任务。"
+          description="用 Agent 一起规划目标与关联任务，确认预览后再创建。"
           action={<CreateGoalDialog />}
         />
       ) : (

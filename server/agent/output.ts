@@ -17,6 +17,44 @@ export interface NormalizedCliOutput {
   warnings: AgentWarning[];
 }
 
+function normalizeClaudeStream(text: string): {recognized: boolean; answer: string; failed: boolean} {
+  let recognized = false;
+  let failed = false;
+  let streamedText = '';
+  let finalResult = '';
+  let assistantText = '';
+  for (const line of text.split(/\r?\n/).filter((part) => part.trim())) {
+    let outer: Record<string, any>;
+    try { outer = JSON.parse(line) as Record<string, any>; } catch { continue; }
+    if (outer.type === 'result') {
+      recognized = true;
+      failed ||= Boolean(outer.is_error) || /error/i.test(String(outer.subtype ?? ''));
+      if (typeof outer.result === 'string') finalResult = outer.result;
+      continue;
+    }
+    if (outer.type === 'stream_event' && outer.event && typeof outer.event === 'object') {
+      recognized = true;
+      const event = outer.event as Record<string, any>;
+      const delta = event.delta as Record<string, any> | undefined;
+      if (event.type === 'content_block_delta' && delta?.type === 'text_delta' && typeof delta.text === 'string') {
+        streamedText += delta.text;
+      }
+      continue;
+    }
+    if (outer.type === 'assistant' && outer.message && Array.isArray(outer.message.content)) {
+      recognized = true;
+      for (const block of outer.message.content) {
+        if (block?.type === 'text' && typeof block.text === 'string') assistantText += block.text;
+      }
+    }
+  }
+  return {
+    recognized,
+    answer: clean(streamedText || assistantText || finalResult),
+    failed,
+  };
+}
+
 export function normalizeCliOutput(provider: AgentRuntimeProvider, exec: ExecResult): NormalizedCliOutput {
   let text = clean(exec.stdout);
   const stderr = clean(exec.stderr);
@@ -33,7 +71,14 @@ export function normalizeCliOutput(provider: AgentRuntimeProvider, exec: ExecRes
     warn('nonzero_exit', 'CLI 以非零状态退出；仅在已提取到有效回答时保留该回答。');
   }
 
-  // Claude's JSON transport envelope is distinct from the model's action JSON.
+  // Claude stream-json contains partial-message events; only text deltas are
+  // accumulated. Thinking and other event blocks stay out of the user reply.
+  if (provider === 'claude') {
+    const stream = normalizeClaudeStream(text);
+    if (stream.recognized) text = stream.failed ? '' : stream.answer;
+  }
+
+  // Claude's single-result JSON transport envelope is distinct from model JSON.
   try {
     const envelope = JSON.parse(text);
     if (envelope && typeof envelope === 'object' && envelope.type === 'result') {

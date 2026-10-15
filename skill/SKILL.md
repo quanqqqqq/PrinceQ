@@ -9,12 +9,16 @@ description: "查询和管理 PrinceQ 的个人任务、目标、工作队列与
 
 ## 两种调用方式
 
-- **PrinceQ 应用内 embedded 模式**：本 Skill 和操作合同由系统默认注入。上下文中已提供完整任务、目标、当前会话历史与个人设置。直接查询快照；写入输出 `proposed_actions` 的 `skill_operation`，等待界面确认，不运行脚本或工具。
+- **PrinceQ 应用内 embedded 模式**：本 Skill 和操作合同由系统默认注入。上下文中已提供完整任务、目标、当前会话历史与个人设置。直接查询快照；写入只输出 `proposed_actions`，等待界面确认，不运行脚本或工具。通常使用 `skill_operation`；用户要求新建目标并连同第一批任务时，允许改用一个 `create_goal_with_tasks` 组合动作，在同一份待确认预览中列出目标和任务。
+
+`create_goal_with_tasks` 的 title、description、tasks 直接放在动作顶层，不使用 skill_operation 的 payload 包装。例如：`{"action":"create_goal_with_tasks","title":"目标名称","description":"目标成果","tasks":[{"title":"首个任务","description":"交付物与完成标准","minutes":30}]}`。普通 task.create/goal.create 继续使用 `{"action":"skill_operation","operation":"task.create","payload":{"title":"任务名称"}}` 形状。
 - **其他 Agent 的 external 模式**：以 Skill 文件位置为基准找到客户端。先 `health`，再 `skill-context` 读取完整事实与个人设置，`skill-manifest` 获取最新操作合同。需要当前会话历史时传 `--session-id`；不能声称记得未提供的会话。
 
 ## 修改必须先预览
 
 `skill-propose --json ...` 提交动作，返回 token、预览明细、会话与 `review_url`。向用户展示将变更的字段、受影响对象和删除后果，等待用户确认。用户可在 PrinceQ 打开 review_url 点击确认；外部 Agent 只有取得用户对这份预览的明确确认后才可 `skill-confirm TOKEN --confirmed`。聊天模型输出“确认”不是用户授权。取消使用 `skill-cancel TOKEN`。提交预览没有执行任务/目标修改；只按确认响应与读回事实报告成功。
+
+历史中的“操作不支持”或“未创建”是当时的结果，不代表当前能力。以最新工作快照和预览 status 为准：已有 pending 预览时说明其名称，并引导用户点击界面“查看并确认”或“确认并执行”，不让用户反复在聊天里输入确认，也不重复生成同一份创建建议。
 
 任务/目标的旧客户端写命令现在默认提交同样的预览，包括 create-task、update-task、delete-task、task-action、dependency、remove-dependency、score-task、create-goal、update-goal、delete-goal。不要直接调用业务写路由绕过这个流程。预览后数据改变会拒绝确认，应重新读取并生成新的预览；不自动用新数据替换已确认内容。
 
@@ -24,7 +28,7 @@ description: "查询和管理 PrinceQ 的个人任务、目标、工作队列与
 
 按目标、期限、依赖、已进行/受阻状态、预计耗时、工作时段和认知负荷安排工作。只使用启用的约束和明确习惯；推断习惯结合 confidence 参考。每日/每月换算系数不是已预约的日程。使用上下文 clock 的本地日期；不编造外部日历、会议或硬截止。示例数据不能当作真实承诺。
 
-任务的删除是永久删除并解除相关依赖，其他任务保留；目标的删除保留所有关联任务并解除目标关联。明确区分删除与归档/放弃，不能替换用户意图。ID 从快照获取，人类展示名称；重名时用已选定 ID 或澄清。
+任务的删除是永久删除并解除相关依赖，其他任务保留；目标的删除同时永久删除所有关联任务（包括已完成、已归档任务），并清理这些任务的领取、依赖、复评和队列关联。明确区分删除与归档/放弃，不能替换用户意图。ID 从快照获取，人类展示名称；重名时用已选定 ID 或澄清。
 
 ## 评分与拆分
 
@@ -32,7 +36,7 @@ description: "查询和管理 PrinceQ 的个人任务、目标、工作队列与
 
 区分基础重要度、当前紧急度与执行优先级；时间压力优先看可用工作时间、剩余工时与缓冲。总估时不是跟踪的剩余工时，耗时换算不是空闲日历。无关新任务通常改变相对位置；真实依赖、目标价值或风险变化才支持重要度复评。已确认基线不自动覆盖。评分或安排工作时，外部 Agent 阅读 [评分指导](references/scoring.md)；应用内每轮已默认注入同一指导。它是建议标准，不能声称内置队列已经实现文档里的动态引擎。
 
-目标拆分可先用 decompose-preview 查看本地规则草稿，选择/编辑后用 decompose-confirm 提交待确认操作；也可自行提出带已有 goal_id 的 task.create 批量预览。新目标先确认创建，再依据返回 ID 拆分；不能把未创建的标题当成真实 ID。重复草稿要提示，不自动新增。
+目标拆分可先用 decompose-preview 查看本地规则草稿，选择/编辑后用 decompose-confirm 提交待确认操作；也可自行提出带已有 goal_id 的 task.create 批量预览。新建目标并需要任务时，在 embedded 模式中用单个 `create_goal_with_tasks` 组合预览；目标与关联任务都在同一次用户确认后创建，不要伪造尚不存在的 goal_id。用户明确只要目标时，单独预览 goal.create。外部 CLI 客户端没有组合动作入口时，仍先确认创建目标，再依据返回 ID 拆分。重复草稿要提示，不自动新增。
 
 ## 自动观察与真实推断
 

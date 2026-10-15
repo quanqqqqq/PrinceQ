@@ -15,6 +15,11 @@ export function mergeAgentMessages(previous: ChatMessage[], incoming: AgentMessa
     seen.add(message.id); return true;
   });
 }
+/** Server history is authoritative; retain only unsaved local turns after it. */
+export function syncAgentMessages(previous: ChatMessage[], incoming: AgentMessage[]): ChatMessage[] {
+  const savedIds = new Set(incoming.map(message => message.id));
+  return [...incoming, ...previous.filter(message => message.delivery && !savedIds.has(message.id))];
+}
 export function pendingUserMessage(content: string, sessionId?: string, id = 'local-' + crypto.randomUUID()): ChatMessage {
   return {id, session_id: sessionId ?? '', role: 'user', content, result: null,
     created_at: new Date().toISOString(), delivery: 'sending'};

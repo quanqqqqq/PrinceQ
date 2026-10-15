@@ -12,7 +12,7 @@
  * 这里只是按实测形状薄封装，错误类型沿用 `ApiRequestError`，长请求可 AbortSignal 取消。
  * env 只发变量名——契约里没有任何密钥值字段。
  */
-import type { AgentMessageResponse } from '@shared/types';
+import type {AgentMessageResponse, AgentProgressView} from '@shared/types';
 import { ApiRequestError } from '@/lib/api';
 import type {
   AgentRuntimeStatusView,
@@ -96,6 +96,9 @@ export const getRuntimeConfig = (): Promise<RuntimeConfigEnvelope> =>
 export const getRuntimeStatus = (): Promise<AgentRuntimeStatusView> =>
   request<AgentRuntimeStatusView>('/api/agent/runtime-status');
 
+export const getAgentProgress = (requestId: string): Promise<AgentProgressView> =>
+  request<AgentProgressView>(`/api/agent/progress/${encodeURIComponent(requestId)}`);
+
 /**
  * 保存配置。body 是**嵌套** `{ config, expected_version }`；config 只含可写字段，
  * env 只带大写变量名——后端契约里没有任何密钥值字段。
@@ -145,6 +148,7 @@ export const sendAgentMessage = (
     intent?: 'goal_task_drafts';
     fallback?: boolean;
     retryOf?: string;
+    progressId?: string;
     signal?: AbortSignal;
   },
 ): Promise<AgentMessageResponse> =>
@@ -157,6 +161,7 @@ export const sendAgentMessage = (
       ...(opts.intent ? { intent: opts.intent } : {}),
       ...(opts.fallback ? { fallback: true } : {}),
       ...(opts.retryOf ? { retry_of: opts.retryOf } : {}),
+      ...(opts.progressId ? { progress_id: opts.progressId } : {}),
       ...(opts.target?.task_id ? { target_task_id: opts.target.task_id } : {}),
       ...(opts.target?.goal_id ? { target_goal_id: opts.target.goal_id } : {}),
     },

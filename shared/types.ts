@@ -478,6 +478,8 @@ export interface AgentResult {
   headline: string;
   /** Complete model answer, retained across session restoration. */
   answer?: string;
+  /** Brief user-facing rationale summary; never contains private chain-of-thought. */
+  summary?: string[];
   warnings?: AgentWarning[];
   provider?: AgentRuntimeProvider | null;
   reasoning: string[];
@@ -572,6 +574,25 @@ export interface AgentMessageResponse {
   fallback_reason?: string | null;
   /** 出错时给用户的下一步选项，如 `retry_agent` / `process_with_command_mode`。 */
   available_actions?: string[];
+}
+
+export type AgentProgressPhase =
+  | 'checking'
+  | 'context'
+  | 'calling'
+  | 'response'
+  | 'validation'
+  | 'complete'
+  | 'failed';
+
+/** Observable execution progress; this deliberately contains no model thought text. */
+export interface AgentProgressView {
+  request_id: string;
+  phase: AgentProgressPhase;
+  message: string;
+  summary_text?: string;
+  started_at: string;
+  updated_at: string;
 }
 
 // ── 本地 CLI Agent 运行时 ─────────────────────────────────────────────────────

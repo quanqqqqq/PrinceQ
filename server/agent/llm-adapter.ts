@@ -14,10 +14,12 @@ import {recordAgentConnection} from './provider-connections.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {StringDecoder} from 'node:string_decoder';
 import {composePrinceQSystemPrompt} from '../skills/injection.ts';
 import {describePendingAction} from './preview-description.ts';
 import { goalDraftFingerprint, normalizeGoalDraftActions } from './goal-draft-contract.ts';
 import type { AgentResult, AgentRuntimeProvider, AgentWarning } from '../../shared/types.ts';
+import type {AgentProgressPhase} from '../../shared/types.ts';
 import {buildPrinceQContext, serializePrinceQContext, readPrinceQSystemPrompt} from './prompt-context.ts';
 import { buildProviderPromptArgs, runCli } from './cli-exec.ts';
 import { normalizeCliOutput, isOkReply } from './output.ts';
@@ -47,6 +49,53 @@ interface ParsedReply {
   answer: string;
   actions: PendingAction[];
   dropped: number;
+  summary?: string[];
+}
+
+/** Only exposes the explicitly user-facing SUMMARY preamble, never provider reasoning events. */
+class SummaryPrefixStream {
+  private buffered = '';
+  private started = false;
+  private finished = false;
+  private emittedText = false;
+  private readonly emit: (delta: string) => void;
+
+  constructor(emit: (delta: string) => void) {
+    this.emit = emit;
+  }
+
+  push(chunk: string): void {
+    if (this.finished || !chunk) return;
+    this.buffered += chunk;
+    if (!this.started) {
+      const marker = /(?:^|\n)SUMMARY:\s*/i.exec(this.buffered);
+      if (!marker) {
+        if (this.buffered.length > 128) this.buffered = this.buffered.slice(-32);
+        return;
+      }
+      this.buffered = this.buffered.slice((marker.index ?? 0) + marker[0].length);
+      this.started = true;
+    }
+
+    const boundary = this.buffered.search(/[\r\n{]/);
+    const text = boundary < 0 ? this.buffered : this.buffered.slice(0, boundary);
+    const delta = this.emittedText ? text : text.replace(/^\s+/, '');
+    if (delta) {
+      this.emit(delta);
+      this.emittedText = true;
+    }
+    this.buffered = boundary < 0 ? '' : '';
+    if (boundary >= 0) this.finished = true;
+  }
+
+  finish(): void {
+    if (!this.finished && this.started && this.buffered) {
+      const delta = this.emittedText ? this.buffered : this.buffered.replace(/^\s+/, '');
+      if (delta) this.emit(delta);
+    }
+    this.buffered = '';
+    this.finished = true;
+  }
 }
 
 /**
@@ -76,19 +125,36 @@ export function parseAgentReply(stdout: string): ParsedReply {
   }
 
   const actions: PendingAction[] = [];
-  let dropped = 0;
+  let dropped = obj.proposed_actions !== undefined && !Array.isArray(obj.proposed_actions) ? 1 : 0;
   const proposed = Array.isArray(obj.proposed_actions) ? obj.proposed_actions : [];
   for (const candidate of proposed) {
-    const result = pendingActionSchema.safeParse(candidate);
+    // Earlier embedded instructions applied skill_operation's payload envelope
+    // to legacy actions too. Accept that exact envelope, then validate every
+    // field against the same strict action schema; never discard unknown keys.
+    let action = candidate;
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      && ['create_task', 'create_goal', 'create_goal_with_tasks', 'task_action', 'add_habit'].includes(candidate.action)
+      && Object.keys(candidate).length === 2 && 'payload' in candidate
+      && candidate.payload && typeof candidate.payload === 'object' && !Array.isArray(candidate.payload)
+      && !('action' in candidate.payload)) {
+      action = {...candidate.payload, action: candidate.action};
+    }
+    const result = pendingActionSchema.safeParse(action);
     if (result.success) actions.push(result.data);
     else dropped += 1;
   }
 
-  return { answer: obj.answer, actions, dropped };
+  const summary = Array.isArray(obj.summary)
+    ? obj.summary.filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim().slice(0, 300)).filter(Boolean).slice(0, 3)
+    : [];
+  return {answer: obj.answer, actions, dropped, ...(summary.length ? {summary} : {})};
 }
 
 export interface RunAgentOptions {
   sessionId?: string | null;
+  onProgress?: (phase: AgentProgressPhase) => void;
+  onSummary?: (delta: string) => void;
 }
 
 /**
@@ -103,6 +169,7 @@ export async function runAgentMessage(
   let systemPrompt: string;
   let goalDraftSnapshot: string | null = null;
   let existingGoalTaskTitles: string[] = [];
+  opts.onProgress?.('context');
   try {
     const context = buildPrinceQContext(req, cfg, opts.sessionId);
     if (req.intent === 'goal_task_drafts') {
@@ -126,9 +193,70 @@ export async function runAgentMessage(
   try {
     const systemPromptFile = path.join(instructionDirectory, 'system.md');
     fs.writeFileSync(systemPromptFile, systemPrompt, {mode:0o600});
-    const args = buildProviderPromptArgs(cfg.provider, '', cfg, {systemPrompt, systemPromptFile, promptViaStdin:true});
+    const args = buildProviderPromptArgs(cfg.provider, '', cfg, {
+      systemPrompt, systemPromptFile, promptViaStdin:true, streamingSummary:true,
+    });
+    const summaryStream = new SummaryPrefixStream((delta) => opts.onSummary?.(delta));
+    const claudeDecoder = new StringDecoder('utf8');
+    const codexDecoder = new StringDecoder('utf8');
+    let claudeLines = '';
+    let codexLines = '';
+    const codexMessages = new Map<string, string>();
+    const processClaudeLine = (line: string) => {
+      try {
+        const outer = JSON.parse(line) as Record<string, any>;
+        const event = outer.type === 'stream_event' && outer.event && typeof outer.event === 'object'
+          ? outer.event as Record<string, any>
+          : outer;
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+          summaryStream.push(event.delta.text);
+        }
+      } catch { /* Ignore non-event diagnostics; the final normalizer reports malformed output. */ }
+    };
+    const processCodexLine = (line: string) => {
+      try {
+        const event = JSON.parse(line) as Record<string, any>;
+        const item = event.item as Record<string, any> | undefined;
+        if (!item || item.type !== 'agent_message' || typeof item.text !== 'string') return;
+        const itemId = typeof item.id === 'string' ? item.id : 'agent-message';
+        const previous = codexMessages.get(itemId) ?? '';
+        const delta = item.text.startsWith(previous) ? item.text.slice(previous.length) : '';
+        codexMessages.set(itemId, item.text);
+        summaryStream.push(delta);
+      } catch { /* Ignore incomplete and unknown JSONL events. */ }
+    };
+    const onStdoutChunk = (chunk: Buffer) => {
+      if (cfg.provider === 'claude') {
+        claudeLines += claudeDecoder.write(chunk);
+        let newline = claudeLines.indexOf('\n');
+        while (newline >= 0) {
+          processClaudeLine(claudeLines.slice(0, newline).trim());
+          claudeLines = claudeLines.slice(newline + 1);
+          newline = claudeLines.indexOf('\n');
+        }
+      } else {
+        codexLines += codexDecoder.write(chunk);
+        let newline = codexLines.indexOf('\n');
+        while (newline >= 0) {
+          processCodexLine(codexLines.slice(0, newline).trim());
+          codexLines = codexLines.slice(newline + 1);
+          newline = codexLines.indexOf('\n');
+        }
+      }
+    };
+    opts.onProgress?.('calling');
     exec = await runCli({executable:cfg.cli_path,args,cwd:cfg.working_directory,envNames:cfg.allowed_env_names,
-      timeoutMs:cfg.timeout_ms,provider:cfg.provider,input:prompt});
+      timeoutMs:cfg.timeout_ms,provider:cfg.provider,input:prompt,
+      maxOutputBytes: 1024 * 1024,
+      onStdoutChunk});
+    if (cfg.provider === 'claude') {
+      claudeLines += claudeDecoder.end();
+      if (claudeLines.trim()) processClaudeLine(claudeLines.trim());
+    } else {
+      codexLines += codexDecoder.end();
+      if (codexLines.trim()) processCodexLine(codexLines.trim());
+    }
+    summaryStream.finish();
   } finally {
     if (instructionDirectory) fs.rmSync(instructionDirectory, {recursive:true,force:true});
   }
@@ -140,6 +268,7 @@ export async function runAgentMessage(
   if (exec.canceled) {
     throw new AgentRuntimeError('canceled', '调用被取消。');
   }
+  opts.onProgress?.('validation');
   const normalized = normalizeCliOutput(cfg.provider, exec);
   if (!normalized.valid) {
     recordAgentConnection(cfg, false, exec.exitCode);
@@ -154,6 +283,9 @@ export async function runAgentMessage(
   // A real valid answer establishes connectivity without persisting conversation content.
   recordAgentConnection(cfg, true, exec.exitCode);
   const reply = parseAgentReply(normalized.answer);
+  if (reply.dropped) {
+    throw new AgentRuntimeError('preview_invalid', `有 ${reply.dropped} 条建议动作格式无效，本次未生成可执行预览，也未创建或修改目标、任务。请点击“重试 Agent”重新生成。`);
+  }
   if (req.intent === 'goal_task_drafts') {
     try {
       if (goalDraftSnapshot !== goalDraftFingerprint(req.db, req.targetGoalId!)) {
@@ -164,10 +296,6 @@ export async function runAgentMessage(
       throw new AgentRuntimeError('preview_invalid', cause instanceof Error ? cause.message : '目标任务草稿不符合要求。');
     }
   }
-  if (reply.dropped) reply.answer += `\n\n其中 ${reply.dropped} 条操作不受支持，未执行；只有有效的待确认预览能用于后续写入。`;
-  const droppedNote = reply.dropped
-    ? [`丢弃了 ${reply.dropped} 条不在白名单内的建议动作。`]
-    : [];
 
   if (reply.actions.length === 0) {
     return {
@@ -175,11 +303,11 @@ export async function runAgentMessage(
         kind: 'answer',
         headline: reply.answer.slice(0, 200),
         answer: reply.answer,
+        ...(reply.summary?.length ? {summary: reply.summary} : {}),
         warnings: normalized.warnings,
         provider: cfg.provider,
         reasoning: [
           `由本地 ${cfg.provider} CLI 回答，模型没有建议任何写动作。`,
-          ...droppedNote,
         ],
         blocks: [],
         pending_action: null,
@@ -192,7 +320,10 @@ export async function runAgentMessage(
     };
   }
 
-  const summary = `模型建议 ${reply.actions.length} 个动作，待确认`;
+  const combinedGoal = reply.actions.find(action => action.action === 'create_goal_with_tasks');
+  const summary = combinedGoal
+    ? `创建目标“${combinedGoal.title}”及 ${combinedGoal.tasks.length} 个关联任务`
+    : `模型建议 ${reply.actions.length} 个动作，待确认`;
   let token: string;
   try {
     token = savePendingActions(req.db, {sessionId:opts.sessionId??null,summary,actions:reply.actions});
@@ -200,25 +331,48 @@ export async function runAgentMessage(
     throw new AgentRuntimeError('preview_invalid', '建议动作未通过预览校验，尚未执行。请检查对象版本和操作字段，或将设置修改拆成独立预览后重试。');
   }
 
+  const blocks: AgentResult['blocks'] = [];
+  const otherActions = reply.actions.filter(action => action.action !== 'create_goal_with_tasks');
+  for (const action of reply.actions) {
+    if (action.action !== 'create_goal_with_tasks') continue;
+    blocks.push({
+      type: 'facts',
+      title: '待创建目标',
+      items: [
+        {label: '名称', value: action.title},
+        ...(action.description ? [{label: '说明', value: action.description}] : []),
+        ...(action.target_date_iso ? [{label: '目标日期', value: action.target_date_iso}] : []),
+      ],
+    });
+    blocks.push({
+      type: 'list',
+      title: `待创建任务（${action.tasks.length}）`,
+      items: action.tasks.map((task, index) =>
+        `${index + 1}. ${task.title}${task.minutes ? ` · 预计 ${task.minutes} 分钟` : ''}${task.deadline_iso ? ` · 截止 ${task.deadline_iso}` : ''}\n${task.description}`,
+      ),
+    });
+  }
+  if (otherActions.length) {
+    blocks.push({
+      type: 'list',
+      title: '其他待确认动作',
+      items: otherActions.map(action => describePendingAction(req.db, action)),
+    });
+  }
+
   return {
     result: {
       kind: 'preview',
       headline: reply.answer.slice(0, 200),
       answer: reply.answer,
+      ...(reply.summary?.length ? {summary: reply.summary} : {}),
       warnings: normalized.warnings,
       provider: cfg.provider,
       reasoning: [
         `由本地 ${cfg.provider} CLI 生成，${reply.actions.length} 个动作**尚未执行**。`,
         '确认之后才会由确定性服务落库；取消则一个字都不写。',
-        ...droppedNote,
       ],
-      blocks: [
-        {
-          type: 'list',
-          title: '待确认的动作',
-          items: reply.actions.map(action => describePendingAction(req.db, action)),
-        },
-      ],
+      blocks,
       pending_action: {
         token,
         command: 'agent.preview',

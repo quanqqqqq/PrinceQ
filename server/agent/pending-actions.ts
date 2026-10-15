@@ -21,7 +21,7 @@ import { withOperation } from '../repo/operations.ts';
 import { applyAction, createTask } from '../repo/task-service.ts';
 import { findGoalsByTitle, findTasksByTitle } from '../repo/tasks.ts';
 
-/** One shared Skill operation contract, plus four legacy proposal shapes. */
+/** One shared Skill operation contract, plus legacy and combined goal proposal shapes. */
 export const pendingActionSchema = z.union([skillOperationSchema, z.discriminatedUnion('action', [
   z.strictObject({
     action: z.literal('create_task'),
@@ -33,7 +33,27 @@ export const pendingActionSchema = z.union([skillOperationSchema, z.discriminate
   z.strictObject({
     action: z.literal('create_goal'),
     title: z.string().trim().min(1).max(200),
+    description: z.string().trim().max(4000).nullish(),
     target_date_iso: z.string().trim().max(40).nullish(),
+  }),
+  z.strictObject({
+    action: z.literal('create_goal_with_tasks'),
+    title: z.string().trim().min(1).max(200),
+    description: z.string().trim().max(4000).nullish(),
+    target_date_iso: z.string().trim().max(40).nullish(),
+    tasks: z.array(z.strictObject({
+      title: z.string().trim().min(1).max(200),
+      description: z.string().trim().min(1).max(4000),
+      deadline_iso: z.string().trim().max(40).nullish(),
+      minutes: z.number().int().min(1).max(10000).nullish(),
+    })).min(1).max(19),
+  }).superRefine((action, ctx) => {
+    const seen = new Set<string>();
+    action.tasks.forEach((task, index) => {
+      const key = task.title.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+      if (seen.has(key)) ctx.addIssue({code: 'custom', path: ['tasks', index, 'title'], message: '任务标题不能重复。'});
+      seen.add(key);
+    });
   }),
   z.strictObject({
     action: z.literal('task_action'),
@@ -73,6 +93,7 @@ export function savePendingActions(db: Db, input: SavePendingInput): string {
 
 export interface ConfirmResult {
   summary: string;
+  createdGoalIds: string[];
   createdTaskIds: string[];
   notes: string[];
 }
@@ -104,6 +125,7 @@ export function confirmPendingActions(
       }
 
       const notes: string[] = [];
+      const createdGoalIds: string[] = [];
       const createdTaskIds: string[] = [];
       const raw = JSON.parse(String(row.actions_json)) as unknown[];
       const validated = raw.map(candidate => pendingActionSchema.parse(candidate));
@@ -153,7 +175,32 @@ export function confirmPendingActions(
           }
 
           case 'create_goal': {
-            createGoal(db, { title: action.title, target_date: action.target_date_iso ?? null });
+            const goal = createGoal(db, {
+              title: action.title,
+              description: action.description ?? null,
+              target_date: action.target_date_iso ?? null,
+            });
+            createdGoalIds.push(goal.id);
+            break;
+          }
+
+          case 'create_goal_with_tasks': {
+            const goal = createGoal(db, {
+              title: action.title,
+              description: action.description ?? null,
+              target_date: action.target_date_iso ?? null,
+            });
+            createdGoalIds.push(goal.id);
+            for (const draft of action.tasks) {
+              const task = createTask(db, {
+                title: draft.title,
+                description: draft.description,
+                deadline: draft.deadline_iso ?? null,
+                estimated_minutes: draft.minutes ?? null,
+                goal_id: goal.id,
+              });
+              createdTaskIds.push(task.id);
+            }
             break;
           }
 
@@ -189,8 +236,8 @@ export function confirmPendingActions(
       );
 
       return {
-        result: { summary: String(row.summary), createdTaskIds, notes },
-        target_id: createdTaskIds[0] ?? null,
+        result: { summary: String(row.summary), createdGoalIds, createdTaskIds, notes },
+        target_id: createdGoalIds[0] ?? createdTaskIds[0] ?? null,
         summary: `确认模型建议：${row.summary}`,
         detail: { task_ids: createdTaskIds, notes },
       };
@@ -216,6 +263,7 @@ export function cancelPendingActions(db: Db, token: string): ConfirmResult {
 
   return {
     summary: String(row.summary),
+    createdGoalIds: [],
     createdTaskIds: [],
     notes:
       row.status === 'pending'

@@ -3,3 +3,27 @@
 @import "./tailwind-theme.css";
 @import "./typography.css";
 @import "./princeq-controls.css";
+
+/* The shell owns the viewport; only its content panes should scroll. */
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.agent-loading-dots {
+  display: inline-block;
+  animation: agent-loading-dots 1.2s step-end infinite;
+}
+
+@keyframes agent-loading-dots {
+  0% { clip-path: inset(0 66.67% 0 0); }
+  33.33% { clip-path: inset(0 33.33% 0 0); }
+  66.67% { clip-path: inset(0 0 0 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-loading-dots { animation: none; }
+}

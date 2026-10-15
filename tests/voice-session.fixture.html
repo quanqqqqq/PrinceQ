@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="UTF-8">
+<title>PrinceQ 语音会话隔离回归</title>
+<body>
+  <div style="padding:12px">
+    <p>模拟录音回归页面：不访问真实麦克风、数据库或 Agent。</p>
+    <button id="finish-asr">返回识别结果（包括已取消的旧请求）</button>
+    <button id="finish-old-asr">仅返回已取消请求的识别结果</button>
+    <button id="finish-tts">返回合成结果（包括已取消的旧请求）</button>
+    <button id="append-audio">模拟补录最后一句</button>
+    <label><input id="hold-agent" type="checkbox">延后助手答复</label>
+    <button id="finish-agent">返回助手答复</button>
+    <button id="sound">模拟说话</button>
+    <button id="quiet">模拟静音 0.5 秒</button>
+    <p id="requests" role="status"></p>
+  </div>
+  <div id="root" style="width:480px;height:560px;border:1px solid #ddd;margin:12px"></div>
+  <script type="module">
+    import React from 'react';
+    import {createRoot} from 'react-dom/client';
+    import {AgentPanel} from '../src/components/AgentPanel.tsx';
+    import {AgentConversationProvider} from '../src/hooks/agent-conversation-provider.tsx';
+    import {WorkspaceProvider} from '../src/hooks/use-workspace.tsx';
+    import '../src/index.css';
+
+    const requests=[];
+    const agentReplies=[];
+    let voiceProcessor;
+    let stoppedTracks=0;
+    const report=()=>{
+      document.querySelector('#requests').textContent=`识别请求 ${requests.filter(r=>r.kind==='asr').length}；合成请求 ${requests.filter(r=>r.kind==='tts').length}；已取消 ${requests.filter(r=>r.signal?.aborted).length}；已停止录音轨道 ${stoppedTracks}`;
+    };
+    const storage=new Map();
+    Object.defineProperty(window,'localStorage',{value:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value)}});
+    Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async()=>({getTracks:()=>[{stop:()=>{stoppedTracks++;report();}}]})}});
+    window.AudioContext=class {
+      sampleRate=16000;
+      createMediaStreamSource(){return {connect(){},disconnect(){}};}
+      createScriptProcessor(){voiceProcessor={onaudioprocess:null,connect(){this.onaudioprocess?.({inputBuffer:{getChannelData:()=>new Float32Array(4096)}});},disconnect(){}};return voiceProcessor;}
+      createGain(){return {gain:{value:0},connect(){},disconnect(){}};}
+      resume(){return Promise.resolve();}
+      close(){return Promise.resolve();}
+    };
+    const result={kind:'answer',headline:'模拟助手答复',answer:'模拟助手答复',reasoning:[],blocks:[],pending_action:null,matched_command:null,mode:'deterministic-local'};
+    const json=value=>new Response(JSON.stringify(value),{status:200,headers:{'Content-Type':'application/json'}});
+    window.fetch=async(url,options={})=>{
+      if(String(url).endsWith('/voice/transcribe')||String(url).endsWith('/voice/synthesize')){
+        return new Promise(resolve=>{
+          requests.push({kind:String(url).endsWith('/transcribe')?'asr':'tts',signal:options.signal,resolve});
+          options.signal?.addEventListener('abort',report,{once:true});
+          report(); // Intentionally ignore abort: exercise late-response guards.
+        });
+      }
+      if(String(url).endsWith('/agent/runtime-status'))return json({configured:false,enabled:false,provider:null,health:{ok:false,reason:'health_unknown',checked_at:null},effective_mode:'deterministic-local',background:{implemented:false,status:'not_implemented'}});
+      if(String(url).endsWith('/agent/sessions'))return json({sessions:[],next_cursor:null});
+      if(String(url).endsWith('/agent/message')){
+        const {message}=JSON.parse(options.body);
+        const reply={session:{id:'fixture-session',title:'模拟会话',updated_at:new Date().toISOString(),message_count:2},messages:[
+          {id:crypto.randomUUID(),session_id:'fixture-session',role:'user',content:message,result:null,created_at:new Date().toISOString()},
+          {id:crypto.randomUUID(),session_id:'fixture-session',role:'agent',content:result.answer,result,created_at:new Date().toISOString()},
+        ],result,invalidates:[]};
+        if(document.querySelector('#hold-agent').checked)return new Promise(resolve=>agentReplies.push(()=>resolve(json(reply))));
+        return json(reply);
+      }
+      if(String(url).endsWith('/queue'))return json({entries:[]});
+      throw new Error(`Unexpected fixture request: ${url}`);
+    };
+    const finish=(kind,onlyCancelled=false)=>{
+      for(const request of requests.filter(r=>r.kind===kind&&!r.finished&&(!onlyCancelled||r.signal?.aborted))){
+        request.finished=true;
+        request.resolve(json(kind==='asr'?{text:'旧会话识别文字'}:{audio_base64:'UklGRg==',mime_type:'audio/wav'}));
+      }
+    };
+    document.querySelector('#finish-asr').onclick=()=>finish('asr');
+    document.querySelector('#finish-old-asr').onclick=()=>finish('asr',true);
+    document.querySelector('#finish-tts').onclick=()=>finish('tts');
+    document.querySelector('#append-audio').onclick=()=>voiceProcessor?.onaudioprocess?.({inputBuffer:{getChannelData:()=>new Float32Array(4096)}});
+    document.querySelector('#finish-agent').onclick=()=>agentReplies.splice(0).forEach(finish=>finish());
+    const emitAudio=(durationMs,level)=>voiceProcessor?.onaudioprocess?.({inputBuffer:{getChannelData:()=>new Float32Array(Math.round(durationMs*16000/1000)).fill(level)}});
+    document.querySelector('#sound').onclick=()=>emitAudio(200,0.1);
+    document.querySelector('#quiet').onclick=()=>emitAudio(500,0);
+    report();
+    createRoot(document.querySelector('#root')).render(
+      React.createElement(WorkspaceProvider,null,React.createElement(AgentConversationProvider,null,React.createElement(AgentPanel)))
+    );
+  </script>
+</body>
+</html>

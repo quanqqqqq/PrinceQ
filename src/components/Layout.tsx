@@ -10,15 +10,18 @@
  * 关键约束——收缩与展开 **都不卸载** `AgentPanel`：它用 `hidden` 切换可见性，
  * 组件始终挂载，消息、`sessionId` 和输入框里没发出去的草稿因此全部保留。
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
   Activity,
   Bot,
   Grid2x2,
+  GripVertical,
   HelpCircle,
   ListOrdered,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRightOpen,
   Settings,
   Target,
@@ -37,6 +40,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { AgentPanel, type AgentPanelStatus } from '@/components/AgentPanel';
+import { SkillDownloadButton } from '@/components/SkillDownloadButton';
 import { Toaster } from '@/components/ui/sonner';
 import { WorkspaceProvider } from '@/hooks/use-workspace';
 import {AgentConversationProvider} from '@/hooks/agent-conversation-provider';
@@ -138,14 +142,14 @@ function HealthBadge() {
   );
 }
 
-function HelpDialog() {
+function HelpDialog({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState(false);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground">
+        <Button variant="ghost" size={compact ? 'icon' : 'sm'} className={cn('text-muted-foreground', compact ? 'size-8' : 'h-7 px-2 text-xs')} aria-label="帮助">
           <HelpCircle />
-          帮助
+          {compact ? <span className="sr-only">帮助</span> : '帮助'}
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-md">
@@ -185,6 +189,56 @@ function Shell() {
     document.title = `${title} · ${APP_NAME}`;
   }, [title]);
   const wide = WIDE_ROUTES.includes(location.pathname);
+  const [navExpanded, setNavExpanded] = useState(() => {
+    try { return localStorage.getItem('princeq.nav-collapsed') !== 'true'; } catch { return true; }
+  });
+  const [assistantWidth, setAssistantWidth] = useState(() => {
+    const available = Math.max(320, window.innerWidth - (navExpanded ? 224 : 64) - 320);
+    const max = Math.min(720, available);
+    try {
+      const stored = Number(localStorage.getItem('princeq.assistant-width'));
+      return Number.isFinite(stored) && stored >= 320 && stored <= 720 ? Math.min(stored, max) : Math.min(416, max);
+    } catch { return Math.min(416, max); }
+  });
+  const [resizingAssistant, setResizingAssistant] = useState(false);
+  const resizeStartRef = useRef<{clientX:number;width:number}|null>(null);
+  useEffect(() => {
+    try { localStorage.setItem('princeq.nav-collapsed', String(!navExpanded)); } catch { /* preference is optional */ }
+  }, [navExpanded]);
+  useEffect(() => {
+    try { localStorage.setItem('princeq.assistant-width', String(assistantWidth)); } catch { /* preference is optional */ }
+  }, [assistantWidth]);
+  useEffect(() => {
+    const clampToViewport = () => {
+      const sidebarWidth = navExpanded ? 224 : 64;
+      const max = Math.min(720, Math.max(320, window.innerWidth - sidebarWidth - 320));
+      setAssistantWidth(current => Math.min(current, max));
+    };
+    window.addEventListener('resize', clampToViewport);
+    return () => window.removeEventListener('resize', clampToViewport);
+  }, [navExpanded]);
+  useEffect(() => {
+    if (!resizingAssistant) return;
+    const onMove = (event: PointerEvent) => {
+      const start = resizeStartRef.current;
+      if (!start) return;
+      const mainMinimum = 320;
+      const sidebarWidth = navExpanded ? 224 : 64;
+      const available = Math.max(320, window.innerWidth - sidebarWidth - mainMinimum);
+      const max = Math.min(720, available);
+      const next = Math.max(320, Math.min(max, start.width + start.clientX - event.clientX));
+      setAssistantWidth(next);
+    };
+    const onEnd = () => { resizeStartRef.current = null; setResizingAssistant(false); };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
+    };
+  }, [resizingAssistant, navExpanded]);
   // 桌面默认收缩，把宽度留给矩阵视图；面板本身始终挂载。
   const [agentOpen, setAgentOpen] = useState(() => new URLSearchParams(window.location.search).has('agent_session'));
   const [mobileAgentOpen, setMobileAgentOpen] = useState(() => new URLSearchParams(window.location.search).has('agent_session') && window.matchMedia('(max-width: 1023px)').matches);
@@ -202,22 +256,41 @@ function Shell() {
   }, []);
 
   return (
-    <div className="princeq-app flex h-screen w-full overflow-hidden bg-background">
+    <div className="princeq-app relative flex h-dvh w-full overflow-hidden bg-background">
       {/* 左侧导航 */}
-      <nav className="hidden w-56 shrink-0 flex-col border-r border-border bg-sidebar md:flex">
-        <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4">
-          <img src="/princeq-mark.svg" alt="" aria-hidden="true" className="size-7 shrink-0" />
-          <span className="truncate text-sm font-semibold tracking-tight">{APP_NAME}</span>
+      <nav className={cn('hidden shrink-0 flex-col border-r border-border bg-sidebar transition-[width] duration-200 md:flex', navExpanded ? 'w-56' : 'w-16')}>
+        <div className={cn('flex h-14 shrink-0 items-center border-b border-border', navExpanded ? 'justify-between gap-2 px-3' : 'justify-center px-2')}>
+          {navExpanded ? <div className="flex min-w-0 items-center gap-2">
+            <img src="/princeq-mark.svg" alt="" aria-hidden="true" className="size-7 shrink-0" />
+            <span className="truncate text-sm font-semibold tracking-tight">{APP_NAME}</span>
+          </div> : null}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" size="icon" variant="ghost" className="size-8 shrink-0 text-muted-foreground" aria-label={navExpanded ? '收起左侧导航' : '展开左侧导航'} onClick={() => {
+                const next = !navExpanded;
+                setNavExpanded(next);
+                const sidebarWidth = next ? 224 : 64;
+                const max = Math.min(720, Math.max(320, window.innerWidth - sidebarWidth - 320));
+                setAssistantWidth(current => Math.min(current, max));
+              }}>
+                {navExpanded ? <PanelLeftClose /> : <PanelLeftOpen />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{navExpanded ? '收起导航栏' : '展开导航栏'}</TooltipContent>
+          </Tooltip>
         </div>
-        <div className="flex-1 space-y-0.5 p-2">
+        <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain p-2">
           {NAV_ITEMS.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.to === '/'}
+              title={!navExpanded ? item.label : undefined}
+              aria-label={!navExpanded ? item.label : undefined}
               className={({ isActive }) =>
                 cn(
-                  'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors hover-elevate active-elevate-2',
+                  'flex w-full flex-row items-center rounded-md py-2 text-sm transition-colors hover-elevate active-elevate-2',
+                  navExpanded ? 'gap-2.5 px-2.5' : 'justify-center px-2',
                   isActive
                     ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
                     : 'text-sidebar-foreground',
@@ -225,20 +298,20 @@ function Shell() {
               }
             >
               <item.icon className="size-4 shrink-0" />
-              <span className="truncate">{item.label}</span>
+              <span className={cn('truncate', navExpanded ? '' : 'sr-only')}>{item.label}</span>
             </NavLink>
           ))}
         </div>
-        <div className="shrink-0 space-y-2 border-t border-border p-3">
-          <p className="text-xs text-muted-foreground">
+        <div className={cn('shrink-0 border-t border-border', navExpanded ? 'space-y-2 p-3' : 'flex flex-col items-center gap-2 p-2')}>
+          {navExpanded ? <p className="text-xs text-muted-foreground">
             {APP_TAGLINE}
-          </p>
-          <HelpDialog />
+          </p> : null}
+          <HelpDialog compact={!navExpanded} />
         </div>
       </nav>
 
       {/* 主列 */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-border px-4">
           <div className="flex min-w-0 items-center gap-3">
             <div className="min-w-0">
@@ -263,7 +336,7 @@ function Shell() {
                 </Button>
               </SheetTrigger>
               <SheetContent side="right" className="w-full p-0 sm:max-w-md">
-                <AgentPanel className="h-full" />
+                <AgentPanel className="h-full" isOpen={mobileAgentOpen} />
               </SheetContent>
             </Sheet>
           </div>
@@ -290,7 +363,8 @@ function Shell() {
         </div>
 
         <OnboardingGuide />
-        <main className="min-h-0 flex-1 overflow-y-auto">
+        {/* Keep absolute accessibility labels inside this scroll container. */}
+        <main className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <div className={cn('p-4 lg:p-6', wide ? 'w-full' : 'mx-auto max-w-4xl')}>
             <Outlet />
           </div>
@@ -300,10 +374,35 @@ function Shell() {
       {/* 停靠的助手：收缩成窄栏或展开成完整面板，两种状态下 AgentPanel 都不卸载 */}
       <div
         className={cn(
-          'hidden shrink-0 border-l border-border lg:flex',
-          agentOpen ? 'w-96 xl:w-[26rem]' : 'w-[52px]',
+          'relative hidden shrink-0 border-l border-border lg:flex',
+          agentOpen ? '' : 'w-[52px]',
         )}
+        style={agentOpen ? {width: `${assistantWidth}px`} : undefined}
       >
+        {agentOpen ? <div
+          role="separator"
+          aria-label="调整助手面板宽度"
+          aria-orientation="vertical"
+          aria-valuemin={320}
+          aria-valuemax={720}
+          aria-valuenow={assistantWidth}
+          tabIndex={0}
+          className={cn('absolute -left-1.5 top-0 z-20 flex h-full w-3 cursor-col-resize touch-none items-center justify-center outline-none focus-visible:ring-2 focus-visible:ring-primary', resizingAssistant ? 'bg-primary/10' : 'hover:bg-primary/10')}
+          onPointerDown={event => {
+            event.preventDefault();
+            resizeStartRef.current = {clientX:event.clientX,width:assistantWidth};
+            setResizingAssistant(true);
+          }}
+          onKeyDown={event => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+            event.preventDefault();
+            const delta = event.key === 'ArrowLeft' ? 24 : -24;
+            const max = Math.min(720, Math.max(320, window.innerWidth - (navExpanded ? 224 : 64) - 320));
+            setAssistantWidth(current => Math.max(320, Math.min(max, current + delta)));
+          }}
+        >
+          <GripVertical className="size-3.5 text-muted-foreground/70" />
+        </div> : null}
         {/* 收缩后的窄栏：图标 + 未读/忙碌提示 + 展开按钮 */}
         <div
           className={cn(
@@ -353,6 +452,7 @@ function Shell() {
                   : '点开助手开始对话'}
             </TooltipContent>
           </Tooltip>
+          <SkillDownloadButton compact />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -373,6 +473,7 @@ function Shell() {
         {/* 完整面板：收缩时只是隐藏，消息、会话和草稿都留着 */}
         <AgentPanel
           className={cn('h-full w-full', agentOpen ? 'flex' : 'hidden')}
+          isOpen={agentOpen}
           onCollapse={() => setAgentOpen(false)}
           onStatusChange={setAgentStatus}
         />

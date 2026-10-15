@@ -1,9 +1,9 @@
 /** Shared conversation state: one owner for desktop, drawer and all routes. */
 import {useCallback,useContext,useEffect,useRef,useState} from 'react';
-import type {AgentSession} from '@shared/types';
-import {mergeAgentMessages,pendingUserMessage,restoreChatMessages,type ChatMessage} from '@/lib/agent-message-state';
+import type {AgentMessageResponse,AgentProgressView,AgentSession} from '@shared/types';
+import {mergeAgentMessages,syncAgentMessages,pendingUserMessage,restoreChatMessages,type ChatMessage} from '@/lib/agent-message-state';
 import {api,ApiRequestError} from '@/lib/api';
-import {getRuntimeStatus,sendAgentMessage,RUNTIME_CONFIG_CHANGED_EVENT} from '@/lib/agent-runtime-client';
+import {getAgentProgress,getRuntimeStatus,sendAgentMessage,RUNTIME_CONFIG_CHANGED_EVENT} from '@/lib/agent-runtime-client';
 import {deriveEffectiveMode,type AgentRuntimeStatusView,type EffectiveMode} from '@/lib/agent-runtime-contract';
 import {useWorkspace} from '@/hooks/use-resource';
 import {AgentConversationContext} from './agent-conversation-context';
@@ -59,6 +59,7 @@ export function useAgentConversationState() {
     } catch { return ''; }
   });
   const [sending, setSending] = useState(false);
+  const [agentProgress, setAgentProgress] = useState<AgentProgressView|null>(null);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 已确认/已取消的预览 token：旧按钮永久失效；跨刷新从 localStorage 恢复。
@@ -86,6 +87,7 @@ export function useAgentConversationState() {
     intent?: 'goal_task_drafts';
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const activeProgressIdRef = useRef<string|null>(null);
   const sendingRef = useRef(false);
   const confirmingRef = useRef(false);
   const selectionRef = useRef(0);
@@ -99,8 +101,12 @@ export function useAgentConversationState() {
   const [historyError,setHistoryError] = useState<string | null>(null);
   const [sessionLoading,setSessionLoading] = useState(false);
   const [sessionTitle,setSessionTitle] = useState('');
+  // Changes only on an explicit conversation boundary, not when the first
+  // reply assigns an id to the current conversation.
+  const [voiceScopeVersion,setVoiceScopeVersion] = useState(0);
   const interactionRef = useRef(0);
   const runtimeReadRef = useRef(0);
+  const conversationReadRef = useRef(0);
 
   /** 当前实际走哪条路：agent 不可用时恒为 local-command（输入仍照发，不吞）。 */
   const effectiveMode: EffectiveMode = deriveEffectiveMode(runtime.enabled, runtime.health.ok);
@@ -112,6 +118,32 @@ export function useAgentConversationState() {
       if (revision === runtimeReadRef.current) setRuntime(status);
     } catch { /* Keep the current local status if the API is offline. */ }
   }, []);
+
+  const refreshConversation = useCallback(async (id?: string) => {
+    if (!id || sendingRef.current || confirmingRef.current || loadingRef.current) return;
+    const revision = ++conversationReadRef.current;
+    const interaction = interactionRef.current;
+    const selection = selectionRef.current;
+    try {
+      const detail = await api.agentSession(id);
+      if (revision !== conversationReadRef.current || interaction !== interactionRef.current || selection !== selectionRef.current) return;
+      setMessages(previous => syncAgentMessages(previous, detail.messages));
+      setSessionTitle(detail.session.title);
+      setDisabledTokens(previous => new Set([...previous, ...(detail.disabled_tokens ?? [])]));
+    } catch { /* Keep local messages and drafts usable while the API is offline. */ }
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState !== 'hidden') void refreshConversation(sessionId);
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [sessionId, refreshConversation]);
 
 
 
@@ -195,7 +227,14 @@ export function useAgentConversationState() {
       /** 重试/回落时显式指定走哪条路；平时按当前 effectiveMode 自动选。 */
       forcedMode?: EffectiveMode,
       retryId?: string,
-      options?: { preserveInput?: boolean; fromShortcut?: boolean; onStarted?: () => void; intent?: 'goal_task_drafts' },
+      options?: {
+        preserveInput?: boolean;
+        fromShortcut?: boolean;
+        onStarted?: () => void;
+        onReply?: (reply: AgentMessageResponse) => void;
+        onError?: (error: unknown) => void;
+        intent?: 'goal_task_drafts';
+      },
     ) => {
       const message = text.trim();
       if (!message || sendingRef.current || confirmingRef.current || loadingRef.current ||
@@ -229,6 +268,19 @@ export function useAgentConversationState() {
         return;
       }
       const mode = forcedMode ?? effectiveMode;
+      const progressId = mode === 'agent' ? crypto.randomUUID() : undefined;
+      let progressPoller: number | undefined;
+      let completedSessionId: string | undefined;
+      if(progressId){
+        activeProgressIdRef.current=progressId;
+        const startedAt=new Date().toISOString();
+        setAgentProgress({request_id:progressId,phase:'checking',message:'正在检查 Agent 运行状态',started_at:startedAt,updated_at:startedAt});
+        progressPoller=window.setInterval(()=>{
+          void getAgentProgress(progressId).then(progress=>{
+            if(activeProgressIdRef.current===progressId)setAgentProgress(progress);
+          }).catch(()=>{});
+        },400);
+      }
 
       try {
         if (options?.fromShortcut) setHistoryOpen(false);
@@ -242,6 +294,7 @@ export function useAgentConversationState() {
           sessionId,
           target,
           processingMode: mode === 'agent' ? 'agent' : 'command',
+          progressId,
           intent: options?.intent,
           signal: controller.signal,
         });
@@ -249,6 +302,8 @@ export function useAgentConversationState() {
 
         // 无论成败，先把这一轮（用户消息 + 回复）写进消息流。
         appendReply(reply, mode === 'agent' ? 'agent' : 'local-command', optimistic.id);
+        completedSessionId = reply.session.id;
+        try { options?.onReply?.(reply); } catch (cause) { console.error('[agent-panel] reply callback failed', cause); }
 
         // agent 单次失败（未就绪/超时/CLI 报错）：后端已保留消息与会话，这里弹
         // 「重试 / 回落本地命令」卡，绝不静默换语义。
@@ -259,6 +314,7 @@ export function useAgentConversationState() {
         // 发完顺手刷新一次运行时状态：CLI 刚恢复时下一条就自动走回 Agent。
         void refreshRuntime();
       } catch (cause) {
+        try { options?.onError?.(cause); } catch (callbackError) { console.error('[agent-panel] error callback failed', callbackError); }
         if (cause instanceof DOMException && cause.name === 'AbortError') {
           // 用户主动取消：不算错，把输入还回去，不留错误卡。
           abortRef.current = null;
@@ -281,17 +337,20 @@ export function useAgentConversationState() {
           );
         }
       } finally {
+        if(progressPoller!==undefined)window.clearInterval(progressPoller);
+        if(progressId&&activeProgressIdRef.current===progressId){activeProgressIdRef.current=null;setAgentProgress(null);}
         sendingRef.current = false;
         setSending(false);
+        if (completedSessionId) void refreshConversation(completedSessionId);
       }
       return true;
     },
-    [appendReply, cancel, disabledTokens, effectiveMode, messages, refreshRuntime, sessionId, historyOpen],
+    [appendReply, cancel, disabledTokens, effectiveMode, messages, refreshRuntime, refreshConversation, sessionId, historyOpen],
   );
 
   const confirm = useCallback(
     async (token: string, drafts?: { index: number; title: string; description?: string | null }[]) => {
-      if (sendingRef.current || confirmingRef.current || loadingRef.current) return;
+      if (sendingRef.current || confirmingRef.current || loadingRef.current) return false;
       interactionRef.current++;
       confirmingRef.current = true;
       setConfirming(true);
@@ -299,6 +358,7 @@ export function useAgentConversationState() {
       if (ok) setDisabledTokens((prev) => new Set(prev).add(token));
       confirmingRef.current = false;
       setConfirming(false);
+      return ok;
     },
     [handle, sessionId],
   );
@@ -306,6 +366,7 @@ export function useAgentConversationState() {
   const reset = useCallback(() => {
     if (sendingRef.current || confirmingRef.current || loadingRef.current) return;
     interactionRef.current++;
+    setVoiceScopeVersion(version=>version+1);
     draftsRef.current[sessionId ?? 'new'] = input;
     selectionRef.current++;
     setHistoryOpen(false);
@@ -332,6 +393,7 @@ export function useAgentConversationState() {
   },[]);
   const selectSession = useCallback(async (id:string) => {
     if(sendingRef.current || confirmingRef.current || loadingRef.current) return;
+    setVoiceScopeVersion(version=>version+1);
     draftsRef.current[sessionId??'new']=input;
     interactionRef.current++; const revision=++selectionRef.current;
     loadingRef.current=true;setSessionLoading(true);setHistoryError(null);
@@ -370,8 +432,8 @@ export function useAgentConversationState() {
     return()=>{stopped=true;};
   },[initialCache]);
   const showHistory = useCallback(()=>{setHistoryOpen(open=>!open);void refreshSessions();},[refreshSessions]);
-  return {messages,sessionId,sessionTitle,input,setInput,sending,confirming,error,setError,disabledTokens,sources,
+  return {messages,sessionId,sessionTitle,voiceScopeVersion,input,setInput,sending,agentProgress,confirming,error,setError,disabledTokens,sources,
     runtime,effectiveMode,failedTurn,abortRef,send,confirm,cancel,reset,sessions,nextCursor,historyOpen,
-    historyLoading,historyError,sessionLoading,showHistory,refreshSessions,selectSession};
+    historyLoading,historyError,sessionLoading,showHistory,refreshSessions,refreshConversation,selectSession};
 }
 export function useAgentConversation() {const value=useContext(AgentConversationContext);if(!value)throw new Error('AgentConversationProvider is missing');return value;}

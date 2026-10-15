@@ -110,6 +110,7 @@ Preflight `OPTIONS` returns `204`. `Access-Control-Allow-Origin` is echoed only 
 | POST | `/api/settings/weights/preview` | Try a weights draft — writes nothing |
 | POST | `/api/settings/weights` | Store the scoring weights and preferences |
 | POST | `/api/agent/message` | Send a natural-language command |
+| GET | `/api/agent/progress/:id` | Read the current observable Agent processing phase |
 | POST | `/api/agent/confirm` | Confirm a pending agent preview |
 | GET | `/api/agent/sessions` | 20 most recently updated sessions |
 | GET | `/api/agent/sessions/:id` | Session + full message history |
@@ -489,6 +490,7 @@ The two columns (`duration_value REAL`, `duration_unit TEXT`, both nullable with
 | `actor_id` | string ≤60 | no — defaults to `actor-human-me` |
 | `target_task_id` | string ≤60 | no — pick a candidate/recommendation by its stable task id; bypasses title matching so identical titles still resolve to exactly one task |
 | `target_goal_id` | string ≤60 | no — same, for goals |
+| `progress_id` | UUID | no — enables polling `/api/agent/progress/:id` while the request runs |
 
 Response: `{ session, messages, result, invalidates }`. `messages` is the persisted pair (user message, then agent reply). `invalidates` lists which UI caches went stale: any of `tasks`, `goals`, `queue`, `activity`, `habits`; empty for read-only and non-writing replies.
 
@@ -507,6 +509,10 @@ Response: `{ session, messages, result, invalidates }`. `messages` is the persis
 ```
 
 `kind` is one of `applied`, `preview`, `clarification`, `answer`, `error`. Block types are `facts`, `list`, `tasks` (task ids), `score`, `task_candidates` / `goal_candidates` (ambiguity cards; each carries a hidden `task_id`/`goal_id` the UI echoes back in `target_task_id`/`target_goal_id` — never rendered to the user) and `decomposition_preview` (the editable draft list).
+
+### GET /api/agent/progress/:id
+
+The `id` is the `progress_id` supplied to `/api/agent/message`. The in-memory response reports `phase`, a short user-facing `message`, and start/update timestamps. While the CLI streams output, optional `summary_text` contains only the explicitly requested user-facing `SUMMARY` line. Phases cover runtime checking, context preparation, CLI invocation, reply validation, and completion/failure. This endpoint never streams private reasoning or raw CLI output. Terminal states expire after two minutes.
 
 ### POST /api/agent/confirm
 
@@ -781,6 +787,7 @@ Three optional request fields are added on top of the body documented above:
 | `processing_mode` | `auto`\|`agent`\|`command` | default `auto`. `auto` picks by health; `agent` forces the model and **errors rather than quietly downgrading** when it is not ready; `command` forces the rule parser |
 | `retry_of` | string ≤60, nullable | the id of the message being retried — a marker only |
 | `fallback` | boolean | **only `true`** permits a fall back to the parser after an agent failure. Default: no fallback |
+| `progress_id` | UUID | optional client-generated id; poll `GET /api/agent/progress/:id` for observable processing phases |
 
 The response keeps `{ session, messages, result, invalidates }` and **adds five optional fields**: `mode`, `provider`, `source`, `fallback_reason`, `available_actions`. Clients that ignore them see no change. (This supersedes the blanket claim at the top of this document that every agent reply carries `"mode": "deterministic-local"` — with the runtime enabled, `mode` may be `agent`.)
 
@@ -959,9 +966,11 @@ Codex 的工作助手调用关闭外部 apps、MCP 与插件配置，保持 read
 
 ## PrinceQ Skill v2
 
+`GET /api/skills/princeq/download` 从当前仓库的 `skill/` 目录即时生成 ZIP，返回 `application/zip` 与附件文件名 `PrinceQ-Agent-Skill.zip`，禁止缓存。包内顶层目录为 `personal-work-queue`，包含 Skill 指令、参考资料、客户端、安装脚本和安装说明；测试脚本、隐藏文件及 Python 缓存不进入分发包。右侧助手收起栏的下载图标和展开面板底部的下载按钮共用此接口。
+
 操作合同以 `GET /api/skills/princeq` 为准；提供完整 context、预览列表/单项、POST previews 和 /:token/confirm|cancel。内外 Agent 共用合同及既有业务路由，模型只有 proposed_actions 表达能力。外部确认要求 confirmed=true，当前没有鉴权；统一预留入口是 server/skills/access.ts。详情见 skill/references/operations.md。
 
-新增 DELETE /api/tasks/:id 与 DELETE /api/goals/:id，body 为可选 expected_version，均记录操作并刷新队列；目标删除保留任务。新增 POST /api/tasks/:id/dependencies/remove {depends_on_id}。Skill 客户端默认将任务、目标、队列、设置写转成统一预览。嵌入式模型默认加载 Skill 与机器合同，完整个人设置按只读 JSON 数据进入原生系统指令；Claude/Codex 每次都使用独立私有临时指令文件，并在调用后移除，避免完整个人设置进入 argv 时触发长度限制。Claude 的文件参数参考[官方 CLI 文档](https://code.claude.com/docs/en/cli-reference)。
+新增 DELETE /api/tasks/:id 与 DELETE /api/goals/:id，body 为可选 expected_version，均记录操作并刷新队列；目标删除同时永久删除所有关联任务（包括已完成、已归档任务），并清理这些任务的领取、依赖、复评和队列关联；返回 deleted_task_ids。新增 POST /api/tasks/:id/dependencies/remove {depends_on_id}。Skill 客户端默认将任务、目标、队列、设置写转成统一预览。嵌入式模型默认加载 Skill 与机器合同，完整个人设置按只读 JSON 数据进入原生系统指令；Claude/Codex 每次都使用独立私有临时指令文件，并在调用后移除，避免完整个人设置进入 argv 时触发长度限制。Claude 的文件参数参考[官方 CLI 文档](https://code.claude.com/docs/en/cli-reference)。
 
 本机 Skill 默认安装目录参考 [Codex 官方文档](https://learn.chatgpt.com/docs/build-skills) 和 [Claude Code 官方文档](https://code.claude.com/docs/en/skills)；安装脚本不改变 CLI 全局配置。
 

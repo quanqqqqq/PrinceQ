@@ -351,6 +351,7 @@ export const settingsWeightsSaveSchema = z.object({
 
 export const agentMessageSchema = z.object({
   intent: z.literal('goal_task_drafts').optional(),
+  progress_id: z.string().uuid().optional(),
   message: z.string().trim().min(1).max(1000),
   session_id: z.string().trim().max(60).nullish(),
   actor_id: z.string().trim().max(60).optional(),

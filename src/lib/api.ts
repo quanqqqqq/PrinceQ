@@ -60,7 +60,7 @@ const newIdempotencyKey = (prefix: string): string =>
   `ui-${prefix}-${crypto.randomUUID().slice(0, 18)}`;
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
   /** Supplying a prefix turns on the Idempotency-Key header. */
   idempotency?: string;
@@ -159,6 +159,13 @@ export const api = {
 
   getTask: (id: string) => request<TaskDetail>(`/tasks/${id}`),
 
+  deleteTask: (id: string, expected_version: number) =>
+    request<{ deleted_task_id: string; removed_dependency_task_ids: string[] }>(`/tasks/${id}`, {
+      method: 'DELETE',
+      body: { expected_version },
+      idempotency: 'task-delete',
+    }),
+
   createTask: (body: CreateTaskInput) =>
     request<{ task: Task }>('/tasks', { method: 'POST', body, idempotency: 'task-create' }),
 
@@ -213,6 +220,13 @@ export const api = {
   listGoals: () => request<{ goals: GoalWithProgress[] }>('/goals'),
 
   getGoal: (id: string) => request<{ goal: GoalWithProgress; tasks: Task[] }>(`/goals/${id}`),
+
+  deleteGoal: (id: string, expected_version: number) =>
+    request<{ deleted_goal_id: string; deleted_task_ids: string[] }>(`/goals/${id}`, {
+      method: 'DELETE',
+      body: { expected_version },
+      idempotency: 'goal-delete',
+    }),
 
   createGoal: (body: { title: string; description?: string; target_date?: string }) =>
     request<{ goal: Goal }>('/goals', { method: 'POST', body, idempotency: 'goal-create' }),

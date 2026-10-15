@@ -1,8 +1,8 @@
 /**
  * 目标详情面板：关联任务、进度，以及 Agent 优先的任务草稿流程。
  *
- * 助手启用时在当前会话生成待确认预览；未启用时使用本地 `previewDecomposition` 草稿；
- * 用户在这里确认选择之后才会真正创建。
+ * 助手启用时在后台生成任务预览并在当前目标页展示；未启用时使用本地
+ * `previewDecomposition` 草稿。两种路径都要由用户确认后才会真正创建。
  *
  * 关联任务列表上方给出按状态 / 任务类型 / 象限的分类统计（始终基于未筛选的全量
  * 任务，所以它是一组稳定的参照数），下面三个紧凑下拉可任意组合地收窄列表，选中的
@@ -15,6 +15,7 @@
  */
 import { useRef, useState } from 'react';
 import type {
+  AgentResult,
   DecompositionDraft,
   DecompositionPreview,
   GoalStatus,
@@ -71,13 +72,15 @@ import { Textarea } from '@/components/ui/textarea';
 import { GoalDateField } from '@/components/GoalDateField';
 import { TaskCard } from '@/components/TaskCard';
 import { TaskDetailDrawer } from '@/components/TaskDetailDrawer';
+import { DeleteEntityButton } from '@/components/DeleteEntityButton';
+import { AgentResultView } from '@/components/AgentResultView';
 import { ErrorState, LoadingRows, WriteError } from '@/components/states';
 import { useResource, useMutation } from '@/hooks/use-resource';
 import { useTaskActions } from '@/hooks/use-task-actions';
 import { api } from '@/lib/api';
 import { useAgentConversation } from '@/hooks/use-agent-conversation';
 import { getRuntimeStatus } from '@/lib/agent-runtime-client';
-import { buildGoalDraftMessage, openAgentPanel } from '@/lib/goal-draft-request';
+import { buildGoalDraftMessage } from '@/lib/goal-draft-request';
 import {
   GOAL_STATUS_LABELS,
   QUADRANT_TITLES,
@@ -424,6 +427,7 @@ export function GoalDetailPanel({
   onOpenChange: (open: boolean) => void;
 }) {
   const [preview, setPreview] = useState<DecompositionPreview | null>(null);
+  const [agentDraftResult, setAgentDraftResult] = useState<AgentResult | null>(null);
   const [preparingDraft, setPreparingDraft] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
   const preparingRef = useRef(false);
@@ -508,10 +512,12 @@ export function GoalDetailPanel({
     preparingRef.current = true;
     setPreparingDraft(true);
     setPlanningError(null);
+    setPreview(null);
+    setAgentDraftResult(null);
     const selectedGoal = currentGoal;
     try {
       // Read current enablement at click time. An enabled but unhealthy Agent
-      // must report its error in the conversation rather than use a rule template.
+      // must report its error here rather than silently use a rule template.
       const runtime = await getRuntimeStatus();
       if (runtime.enabled) {
         const accepted = await conversation.send(
@@ -523,11 +529,10 @@ export function GoalDetailPanel({
             preserveInput: true,
             fromShortcut: true,
             intent: 'goal_task_drafts',
-            onStarted: () => {
-              setPreview(null);
-              onOpenChange(false);
-              openAgentPanel();
+            onReply: reply => {
+              setAgentDraftResult(reply.result);
             },
+            onError: cause => setPlanningError(cause instanceof Error ? cause.message : 'Agent 生成任务草稿失败，请重试。'),
           },
         );
         if (accepted === false) setPlanningError('助手正在处理其他操作，请完成后再生成任务草稿。');
@@ -551,9 +556,17 @@ export function GoalDetailPanel({
     if (created) setPreview(null);
   };
 
+  const confirmAgentDraft = async (token: string, drafts?: DraftOverride[]) => {
+    if (await conversation.confirm(token, drafts)) setAgentDraftResult(null);
+  };
+
+  const cancelAgentDraft = async (token: string) => {
+    if (await conversation.cancel(token)) setAgentDraftResult(null);
+  };
+
   // 残留的 preview token 属于上一个打开的目标，必须清掉。
   const close = (next: boolean) => {
-    if (!next) setPreview(null);
+    if (!next) { setPreview(null); setAgentDraftResult(null); }
     onOpenChange(next);
   };
 
@@ -652,6 +665,12 @@ export function GoalDetailPanel({
                         <Pencil />
                         编辑目标
                       </Button>
+                      <DeleteEntityButton
+                        kind="goal"
+                        entity={currentGoal}
+                        disabled={!detail.current || goalWrite.pending !== null || draft.pending !== null || preparingDraft || conversation.sending || conversation.confirming}
+                        onDeleted={() => close(false)}
+                      />
                       {currentGoal.status === 'active' ? (
                         <>
                           <Button
@@ -741,7 +760,16 @@ export function GoalDetailPanel({
             {error ? <WriteError message={error} onDismiss={clearError} /> : null}
             {blockDialog}
 
-            {preview ? (
+            {agentDraftResult ? (
+              <AgentResultView
+                result={agentDraftResult}
+                onConfirm={(token, drafts) => void confirmAgentDraft(token, drafts)}
+                onCancel={token => void cancelAgentDraft(token)}
+                onSend={(text, target) => void conversation.send(text, target)}
+                confirming={conversation.confirming}
+                disabledTokens={conversation.disabledTokens}
+              />
+            ) : preview ? (
               <DraftPreview
                 preview={preview}
                 onConfirm={(overrides) => void confirmPreview(overrides)}
@@ -756,7 +784,7 @@ export function GoalDetailPanel({
                 onClick={() => void requestPreview()}
               >
                 <Sparkles />
-                {preparingDraft || draft.pending === 'preview' ? '拟草稿中…' : '为这个目标拟任务草稿'}
+                {preparingDraft || draft.pending === 'preview' ? '正在后台生成任务草稿…' : '为这个目标拟任务草稿'}
               </Button>
             )}
 

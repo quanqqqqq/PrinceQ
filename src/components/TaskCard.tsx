@@ -51,6 +51,7 @@ import {
   translateSystemText,
 } from '@/lib/format';
 import { ScoreBreakdownPanel } from '@/components/ScoreBreakdownPanel';
+import { DeleteEntityButton } from '@/components/DeleteEntityButton';
 import type { ScoreBreakdown } from '@shared/types';
 
 const QUADRANT_ORDER: Quadrant[] = ['q1', 'q2', 'q3', 'q4'];
@@ -88,7 +89,7 @@ export interface TaskCardProps {
   onSelect?: (taskId: string) => void;
   /** 悬停任务条：用于临时高亮图中的点。 */
   onHoverChange?: (taskId: string | null) => void;
-  /** 打开三入口共用的任务详情抽屉；不传则不显示「详情」按钮。 */
+  /** 打开三入口共用的任务详情抽屉；不传则不显示「查看」按钮。 */
   onOpenDetail?: (taskId: string) => void;
 }
 
@@ -352,7 +353,7 @@ export function TaskCard({
                 onClick={() => onOpenDetail(task.id)}
               >
                 <Info />
-                详情
+                查看
               </Button>
             ) : null}
 
@@ -390,6 +391,8 @@ export function TaskCard({
                 </DropdownMenuContent>
               </DropdownMenu>
             ) : null}
+
+            <DeleteEntityButton kind="task" entity={task} disabled={busy} />
 
             {showBreakdown && breakdown ? (
               <Button

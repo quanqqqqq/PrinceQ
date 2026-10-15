@@ -76,14 +76,15 @@ export class Router {
 }
 
 const MAX_BODY_BYTES = 256 * 1024;
+export const MAX_VOICE_BODY_BYTES = 12 * 1024 * 1024;
 
-export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+export async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
   if (req.method === 'GET' || req.method === 'HEAD') return undefined;
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       throw badRequest('Request body is too large.');
     }
     chunks.push(chunk as Buffer);

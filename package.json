@@ -9,6 +9,7 @@
     "dev:web": "vite",
     "dev:api": "node --disable-warning=ExperimentalWarning --watch server/index.ts",
     "db:setup": "node --disable-warning=ExperimentalWarning server/db/migrate.ts",
+    "voice:setup": "sh scripts/setup-qwen-voice.sh",
     "setup": "npm install && npm run db:setup",
     "build": "vite build",
     "test": "node --disable-warning=ExperimentalWarning --test \"tests/**/*.test.ts\"",

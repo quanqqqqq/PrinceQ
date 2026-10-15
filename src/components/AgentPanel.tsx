@@ -5,7 +5,7 @@
  * 注意：示例指令本身是发给后端解析器的业务值（英文关键词），只给中文说明，
  * 不翻译要发送的指令文本。
  */
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {useAgentConversation} from '@/hooks/use-agent-conversation';
 import {
   ArrowUp,
@@ -13,6 +13,7 @@ import {
   Cpu,
   History,
   Loader2,
+  Mic,
   PanelRightClose,
   RotateCcw,
   Sparkles,
@@ -26,6 +27,8 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { AgentResultView } from '@/components/AgentResultView';
+import { AgentSummary } from '@/components/AgentSummary';
+import { SkillDownloadButton } from '@/components/SkillDownloadButton';
 import { WriteError } from '@/components/states';
 import { api } from '@/lib/api';
 import {
@@ -37,6 +40,9 @@ import {
 import { useResource } from '@/hooks/use-resource';
 import { APP_NAME, demoTitle } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { synthesizeAgentSpeech, transcribeAgentVoice } from '@/lib/agent-voice-client';
+import { VoiceSilenceDetector } from '@/lib/voice-silence-detector';
+import type { AgentMessageResponse } from '@shared/types';
 
 /**
  * 快捷示例：原样发给后端中文解析器（UX-10）。和手敲走的是同一条
@@ -65,11 +71,116 @@ const HEALTH_TONE_CLASS: Record<string, string> = {
   bad: 'border-red-300 bg-red-50 text-red-700',
 };
 
+const AGENT_PROGRESS_STEPS = [
+  {phase: 'context', label: '整理工作区上下文'},
+  {phase: 'calling', label: '调用本机 Agent'},
+  {phase: 'response', label: '接收 Agent 输出'},
+  {phase: 'validation', label: '校验答复与待确认操作'},
+] as const;
+
+const AGENT_PROGRESS_INDEX: Record<string, number> = {
+  checking: -1,
+  context: 0,
+  calling: 1,
+  response: 2,
+  validation: 3,
+  complete: 4,
+  failed: -1,
+};
+
 /** 队列里一条「推荐指令」：绑定任务稳定 id，标题随真实任务更新。 */
 interface Recommendation {
   taskId: string;
   label: string;
   command: string;
+}
+
+interface VoiceCapture {
+  controller: AbortController;
+  stream: MediaStream;
+  context: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  sink: GainNode;
+  sampleRate: number;
+  chunks: Float32Array[];
+  partialBusy: boolean;
+  partialTimer: number | null;
+  partialRequest: Promise<string> | null;
+  partialSampleCount: number;
+  lastTranscript: string;
+  silenceDetector: VoiceSilenceDetector;
+}
+
+function releaseVoiceCapture(capture: VoiceCapture, abortRecognition=true): void {
+  if(abortRecognition)capture.controller.abort();
+  if (capture.partialTimer!==null) window.clearInterval(capture.partialTimer);
+  capture.processor.onaudioprocess=null;
+  capture.processor.disconnect();
+  capture.source.disconnect();
+  capture.sink.disconnect();
+  capture.stream.getTracks().forEach(track=>track.stop());
+  void capture.context.close().catch(()=>{});
+}
+
+function microphoneErrorMessage(cause: unknown): string {
+  if (cause instanceof Error) {
+    switch (cause.name) {
+      case 'NotAllowedError':
+      case 'SecurityError':
+        return '麦克风权限被拒绝，请在浏览器或系统设置中允许此页面使用麦克风，再重试。';
+      case 'NotFoundError':
+        return '没有找到可用的麦克风，请连接麦克风并检查系统的声音输入设置。';
+      case 'NotReadableError':
+        return '无法读取麦克风，设备可能被其他应用占用或发生故障；请检查后重试。';
+      case 'AbortError':
+        return '麦克风启动被中断，请再试一次。';
+      default:
+        return cause.message || '麦克风启动失败，请检查麦克风权限和声音输入设置。';
+    }
+  }
+  return '麦克风启动失败，请检查麦克风权限和声音输入设置。';
+}
+
+function encodePcmWav(samples: Float32Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const write = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  write(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); write(8, 'WAVE'); write(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true); write(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (const sample of samples) {
+    const clipped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(offset, clipped < 0 ? clipped * 32768 : clipped * 32767, true);
+    offset += 2;
+  }
+  return new Blob([buffer], {type: 'audio/wav'});
+}
+
+function resampleMono(input: Float32Array, inputRate: number, outputRate: number): Float32Array {
+  if (inputRate === outputRate) return input;
+  const ratio = inputRate / outputRate;
+  const output = new Float32Array(Math.floor(input.length / ratio));
+  for (let i = 0; i < output.length; i += 1) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(input.length, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = start; j < end; j += 1) sum += input[j];
+    output[i] = sum / Math.max(1, end - start);
+  }
+  return output;
+}
+
+function captureToWav(capture: VoiceCapture): Blob {
+  const samples=new Float32Array(capture.chunks.reduce((count,chunk)=>count+chunk.length,0));
+  let cursor=0;
+  for(const chunk of capture.chunks){samples.set(chunk,cursor);cursor+=chunk.length;}
+  return encodePcmWav(resampleMono(samples,capture.sampleRate,16000),16000);
 }
 
 /**
@@ -122,21 +233,267 @@ export type AgentPanelStatus = {
 
 export function AgentPanel({
   className,
+  isOpen = true,
   onCollapse,
   onStatusChange,
 }: {
   className?: string;
+  isOpen?: boolean;
   /** 传入才会在头部显示收起按钮；窄屏抽屉里不传。 */
   onCollapse?: () => void;
   onStatusChange?: (status: AgentPanelStatus) => void;
 }) {
-  const {messages,sessionId,sessionTitle,input,setInput,sending,confirming,error,setError,disabledTokens,sources,
+  const {messages,sessionId,sessionTitle,voiceScopeVersion,input,setInput,sending,agentProgress,confirming,error,setError,disabledTokens,sources,
     runtime,effectiveMode,failedTurn,abortRef,send,confirm,cancel,reset,sessions,nextCursor,historyOpen,
-    historyLoading,historyError,sessionLoading,showHistory,refreshSessions,selectSession}=useAgentConversation();
+    historyLoading,historyError,sessionLoading,showHistory,refreshSessions,refreshConversation,selectSession}=useAgentConversation();
   const recommendations=useRecommendations();
   const endRef=useRef<HTMLDivElement>(null);
-  useEffect(()=>{endRef.current?.scrollIntoView({behavior:'smooth',block:'end'});},[messages,sending]);
+  const conversationRef=useRef<HTMLDivElement>(null);
+  const pendingPreviewRef=useRef<HTMLDivElement>(null);
+  const pendingPreview=[...messages].reverse().find(message => message.result?.pending_action && !disabledTokens.has(message.result.pending_action.token));
+  useEffect(() => {
+    if (isOpen) void refreshConversation(sessionId);
+  }, [isOpen, sessionId, refreshConversation]);
+  const captureRef=useRef<VoiceCapture|null>(null);
+  const voiceDraftRef=useRef<string|null>(null);
+  const speechUrlRef=useRef<string|null>(null);
+  const voiceAbortRef=useRef<AbortController|null>(null);
+  const speechAbortRef=useRef<AbortController|null>(null);
+  const voiceGenerationRef=useRef(0);
+  const speechGenerationRef=useRef(0);
+  const [recording,setRecording]=useState(false);
+  const [voiceStarting,setVoiceStarting]=useState(false);
+  const [voiceBusy,setVoiceBusy]=useState(false);
+  const [voiceRefining,setVoiceRefining]=useState(false);
+  const [speechBusy,setSpeechBusy]=useState(false);
+  const [speechStatus,setSpeechStatus]=useState('');
+  const [voiceStatus,setVoiceStatus]=useState('');
+  const [speechUrl,setSpeechUrl]=useState<string|null>(null);
+  const voiceStatusId=useId();
+  const voiceCanCancel=voiceStarting||voiceBusy||voiceRefining;
+  const voiceDisabledReason=recording?'':voiceStarting
+    ? '正在请求麦克风权限；再次点击麦克风可取消启动。'
+    : voiceBusy
+    ? `${voiceStatus || '录音已结束，正在等待识别结果。'}再次点击麦克风可断开本次识别。`
+    : confirming
+          ? '语音输入暂不可用：正在执行已确认的操作，完成后可再次录音。'
+          : sessionLoading
+            ? '语音输入暂不可用：正在加载会话，请稍候。'
+            : historyOpen
+              ? '语音输入暂不可用：当前正在查看历史会话，请返回会话后再录音。'
+              : !window.isSecureContext
+                ? '语音输入不可用：当前页面不是安全连接，请通过 HTTPS 或本机 localhost 打开。'
+                : !navigator.mediaDevices?.getUserMedia || typeof AudioContext==='undefined'
+                  ? '语音输入不可用：当前浏览器不支持麦克风录音，请使用支持录音的浏览器。'
+                  : '';
+  const voiceButtonDisabled=Boolean(voiceDisabledReason)&&!voiceCanCancel;
+  const voiceActionLabel=recording?'结束录音':voiceBusy||voiceRefining?'断开语音识别':voiceStarting?'取消启动录音':'语音输入';
+  const voiceDescription=voiceDisabledReason || voiceStatus;
+  useLayoutEffect(() => {
+    if (!isOpen || historyOpen || sessionLoading) return;
+    const content = conversationRef.current;
+    const viewport = endRef.current?.closest<HTMLDivElement>('[data-slot="scroll-area-viewport"]');
+    if (!content || !viewport) return;
+    // Reopening a mounted panel must reset its saved scroll position. Observe
+    // later layout changes too, including the summaries' character animation.
+    let followingLatest = true;
+    const scrollToLatest = () => {
+      if (followingLatest && viewport.clientHeight > 0) viewport.scrollTop = viewport.scrollHeight;
+    };
+    const onScroll = () => {
+      followingLatest = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 4;
+    };
+    scrollToLatest();
+    const frame = requestAnimationFrame(scrollToLatest);
+    const observer = new ResizeObserver(scrollToLatest);
+    observer.observe(viewport);
+    observer.observe(content);
+    viewport.addEventListener('scroll', onScroll, {passive: true});
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      viewport.removeEventListener('scroll', onScroll);
+    };
+  }, [isOpen, historyOpen, sessionLoading, sessionId, messages, sending]);
   useEffect(()=>{onStatusChange?.({messageCount:messages.length,sending});},[messages.length,sending,onStatusChange]);
+  const cancelVoiceInput=useCallback((status='')=>{
+    voiceGenerationRef.current++;
+    voiceAbortRef.current?.abort();voiceAbortRef.current=null;
+    const capture=captureRef.current;
+    captureRef.current=null;
+    if(capture)releaseVoiceCapture(capture);
+    voiceDraftRef.current=null;
+    setRecording(false);setVoiceStarting(false);setVoiceBusy(false);setVoiceRefining(false);setVoiceStatus(status);
+  },[]);
+  const cancelSpeechWork=useCallback((status='')=>{
+    speechGenerationRef.current++;
+    speechAbortRef.current?.abort();speechAbortRef.current=null;
+    if(speechUrlRef.current)URL.revokeObjectURL(speechUrlRef.current);
+    speechUrlRef.current=null;setSpeechUrl(null);
+    setSpeechBusy(false);setSpeechStatus(status);
+  },[]);
+  const cancelVoiceWork=useCallback((status='')=>{
+    cancelVoiceInput(status);cancelSpeechWork();
+  },[cancelVoiceInput,cancelSpeechWork]);
+  // A new/switching conversation cancels its predecessor's work. Each async
+  // callback also checks its generation so late responses cannot alter drafts.
+  useEffect(()=>()=>cancelVoiceWork(),[voiceScopeVersion,cancelVoiceWork]);
+
+  const speakReply=async(result:AgentMessageResponse['result'])=>{
+    const generation=speechGenerationRef.current;
+    const controller=new AbortController();
+    speechAbortRef.current?.abort();speechAbortRef.current=controller;
+    setSpeechBusy(true);setSpeechStatus('正在生成回复语音，可继续录音或输入。');
+    try{
+      const blob=await synthesizeAgentSpeech(result,controller.signal);
+      if(controller.signal.aborted || generation!==speechGenerationRef.current || speechAbortRef.current!==controller)return;
+      const nextUrl=URL.createObjectURL(blob);
+      if(speechUrlRef.current)URL.revokeObjectURL(speechUrlRef.current);
+      speechUrlRef.current=nextUrl;setSpeechUrl(nextUrl);
+      setSpeechStatus('回复语音已生成，可播放。');
+    }catch(cause){
+      if(!controller.signal.aborted && generation===speechGenerationRef.current && speechAbortRef.current===controller)setSpeechStatus(`语音合成失败：${cause instanceof Error?cause.message:'未知错误'}`);
+    }finally{
+      if(speechAbortRef.current===controller){speechAbortRef.current=null;setSpeechBusy(false);}
+    }
+  };
+
+  const sendCurrentInput=()=>{
+    if(recording||voiceStarting||voiceBusy||sending||confirming||sessionLoading||historyOpen)return;
+    const text=input.trim();
+    if(!text)return;
+    const cameFromVoice=voiceDraftRef.current===text;
+    // Sending closes this input's recognition and any preceding reply audio.
+    // Reply synthesis has its own lifetime and never reserves the microphone.
+    cancelVoiceWork();
+    const generation=speechGenerationRef.current;
+    void send(text,undefined,undefined,undefined,cameFromVoice?{
+      onReply:reply=>{
+        if(generation!==speechGenerationRef.current)return;
+        if(reply.result.kind==='error')setSpeechStatus('本轮没有可朗读的回复。');
+        else void speakReply(reply.result);
+      },
+    }:undefined);
+  };
+
+  const toggleVoiceCapture=async()=>{
+    if(voiceCanCancel){
+      cancelVoiceInput(voiceBusy||voiceRefining
+        ? '已断开本次语音识别，可以重新点击麦克风开始录音；输入框中的文字已保留。'
+        : '已停止本次语音处理，可以重新点击麦克风开始录音；输入框中的文字已保留。');
+      return;
+    }
+    if(!recording){
+      if(voiceDisabledReason || voiceAbortRef.current)return;
+      // Stop prior reply audio before a new recording so it cannot be captured
+      // as microphone input or keep the shared model queue occupied.
+      cancelSpeechWork();
+      const generation=voiceGenerationRef.current;
+      const controller=new AbortController();
+      voiceAbortRef.current=controller;setVoiceStarting(true);
+      let stream:MediaStream|undefined;
+      let context:AudioContext|undefined;
+      try{
+        stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
+        if(controller.signal.aborted || generation!==voiceGenerationRef.current){stream.getTracks().forEach(track=>track.stop());return;}
+        context=new AudioContext();
+        const source=context.createMediaStreamSource(stream);
+        const processor=context.createScriptProcessor(4096,1,1);
+        const sink=context.createGain();sink.gain.value=0;
+        const chunks:Float32Array[]=[];
+        const capture:VoiceCapture={controller,stream,context,source,processor,sink,sampleRate:context.sampleRate,chunks,partialBusy:false,partialTimer:null,partialRequest:null,partialSampleCount:0,lastTranscript:'',silenceDetector:new VoiceSilenceDetector()};
+        captureRef.current=capture;
+        processor.onaudioprocess=event=>{
+          if(captureRef.current!==capture || controller.signal.aborted)return;
+          const samples=new Float32Array(event.inputBuffer.getChannelData(0));
+          chunks.push(samples);
+          if(capture.silenceDetector.process(samples,capture.sampleRate))void finishVoiceCapture(capture,true);
+        };
+        source.connect(processor);processor.connect(sink);sink.connect(context.destination);
+        await context.resume();
+        if(controller.signal.aborted || generation!==voiceGenerationRef.current || captureRef.current!==capture)return;
+        capture.partialTimer=window.setInterval(()=>{
+          if(captureRef.current!==capture||capture.partialBusy||capture.chunks.length===0)return;
+          capture.partialBusy=true;
+          capture.partialSampleCount=capture.chunks.reduce((count,chunk)=>count+chunk.length,0);
+          capture.partialRequest=transcribeAgentVoice(captureToWav(capture),controller.signal);
+          void capture.partialRequest.then(transcript=>{
+            if(captureRef.current!==capture)return;
+            const text=transcript.trim();
+            if(text){capture.lastTranscript=text;voiceDraftRef.current=text;setInput(text);setVoiceStatus('正在录音…识别文字已实时更新；说话后静音 1 秒自动结束。');}
+          }).catch(()=>{
+            if(captureRef.current===capture)setVoiceStatus('正在录音…本段暂未识别，请继续说或结束录音重试');
+          }).finally(()=>{capture.partialBusy=false;});
+        },1800);
+        setRecording(true);setVoiceStatus('正在录音，识别文字会实时填入输入框；说话后静音 1 秒自动结束。');
+      }catch(cause){
+        const current=!controller.signal.aborted && generation===voiceGenerationRef.current;
+        if(captureRef.current?.controller===controller){releaseVoiceCapture(captureRef.current);captureRef.current=null;}
+        stream?.getTracks().forEach(track=>track.stop());
+        if(context)void context.close().catch(()=>{});
+        if(current){
+          voiceAbortRef.current=null;
+          setVoiceStatus(`语音输入无法启动：${microphoneErrorMessage(cause)}`);
+        }
+      }finally{if(generation===voiceGenerationRef.current)setVoiceStarting(false);}
+      return;
+    }
+
+    const capture=captureRef.current;
+    if(capture)await finishVoiceCapture(capture);
+  };
+
+  async function finishVoiceCapture(capture:VoiceCapture,automatic=false){
+    if(captureRef.current!==capture)return;
+    const generation=voiceGenerationRef.current;
+    captureRef.current=null;setRecording(false);
+    // Stop the physical microphone without killing an ASR request that can
+    // finish this recording. Killing it forced a cold model restart on stop.
+    releaseVoiceCapture(capture,false);
+    const controller=capture.controller;voiceAbortRef.current=controller;
+    let preview=capture.lastTranscript;
+    const endDescription=automatic?'连续静音 1 秒，麦克风已自动关闭。':'录音已结束。';
+    const showPreview=(text:string)=>{
+      preview=text;voiceDraftRef.current=text;setInput(text);
+      setVoiceBusy(false);setVoiceRefining(true);
+      setVoiceStatus(`${endDescription}文字可编辑并手动发送；正在后台补全最后一段语音。`);
+    };
+    if(preview)showPreview(preview);
+    else{setVoiceBusy(true);setVoiceStatus(`${endDescription}正在识别语音…`);}
+    let deadline:ReturnType<typeof setTimeout>;
+    const armDeadline=()=>{
+      clearTimeout(deadline);
+      deadline=setTimeout(()=>controller.abort(new DOMException('本次语音识别等待超时','TimeoutError')),preview?15_000:90_000);
+    };
+    armDeadline();
+    try{
+      let transcript='';
+      if(capture.partialRequest){
+        try{transcript=(await capture.partialRequest).trim();}catch{controller.signal.throwIfAborted();}
+        if(controller.signal.aborted || generation!==voiceGenerationRef.current)return;
+      }
+      const sampleCount=capture.chunks.reduce((count,chunk)=>count+chunk.length,0);
+      if(!transcript || capture.partialSampleCount!==sampleCount){
+        if(transcript){showPreview(transcript);armDeadline();}
+        transcript=(await transcribeAgentVoice(captureToWav(capture),controller.signal)).trim();
+      }
+      if(controller.signal.aborted || generation!==voiceGenerationRef.current)return;
+      if(!transcript)throw new Error('没有识别到语音，请再试一次。');
+      voiceDraftRef.current=transcript;
+      setInput(transcript);
+      setVoiceStatus(`${automatic?'连续静音 1 秒后已自动结束录音。':''}语音已识别，文本已填入输入框；检查后手动发送。`);
+    }catch(cause){
+      if(voiceAbortRef.current===controller && generation===voiceGenerationRef.current){
+        const message=controller.signal.reason?.name==='TimeoutError'?'识别服务等待超时':cause instanceof Error?cause.message:'未知错误';
+        setVoiceStatus(preview
+          ? `后台补全未完成：${message}；已保留实时识别文字，可以编辑后手动发送。`
+          : `语音输入失败：${message}；可以重新录音。`);
+      }
+    }finally{
+      clearTimeout(deadline);
+      if(voiceAbortRef.current===controller){voiceAbortRef.current=null;setVoiceBusy(false);setVoiceRefining(false);}
+    }
+  }
 
   return (
     <aside className={cn('flex h-full min-h-0 flex-col bg-card', className)}>
@@ -174,8 +531,8 @@ export function AgentPanel({
             size="sm"
             variant="ghost"
             className="text-muted-foreground"
-            disabled={messages.length === 0 || sending || confirming || sessionLoading}
-            onClick={reset}
+            disabled={(messages.length === 0 && !recording && !voiceStarting && !voiceBusy && !voiceRefining && !speechBusy && !voiceStatus && !input.trim()) || sending || confirming || sessionLoading}
+            onClick={()=>{cancelVoiceWork();reset();}}
           >
             <RotateCcw />
             新会话
@@ -208,7 +565,7 @@ export function AgentPanel({
           {sessions.map(session=><button key={session.id} type="button" disabled={sessionLoading||sending||confirming}
             aria-current={session.id===sessionId?'true':undefined}
             className={cn('w-full rounded-lg border p-3 text-left transition-colors hover:bg-muted',session.id===sessionId?'border-primary bg-primary/5':'border-border')}
-            onClick={()=>void selectSession(session.id)}>
+            onClick={()=>{cancelVoiceWork();void selectSession(session.id);}}>
             <span className="block truncate text-sm font-medium">{session.title || '未命名会话'}</span>
             <span className="mt-1 block truncate text-xs text-muted-foreground">{session.last_message || '查看对话'}</span>
             <span className="mt-1 block text-[11px] text-muted-foreground">{session.message_count} 条消息 · {new Date(session.updated_at).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}{session.id===sessionId?' · 当前会话':''}</span>
@@ -217,7 +574,7 @@ export function AgentPanel({
           {nextCursor ? <Button variant="outline" className="w-full" disabled={historyLoading} onClick={()=>void refreshSessions(nextCursor)}>加载更早会话</Button> : null}
         </div>
       </ScrollArea> : <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-4 p-4">
+        <div ref={conversationRef} className="space-y-5 p-4">
           {messages.length === 0 ? (
             <div className="space-y-3">
               <div className="rounded-md border border-border bg-muted/30 p-3">
@@ -276,8 +633,9 @@ export function AgentPanel({
           {messages.map((message) =>
             message.role === 'user' ? (
               <div key={message.id} className="flex justify-end">
-                <div className="max-w-[85%] space-y-1">
-                  <p className="whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-primary px-3 py-2 text-sm text-primary-foreground">{message.content}</p>
+                <div className="max-w-[88%] space-y-1.5">
+                  <p className="px-1 text-right text-[11px] font-medium text-muted-foreground">你</p>
+                  <p className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-primary/15 bg-primary/5 px-4 py-3 text-[14px] leading-6 text-foreground shadow-sm">{message.content}</p>
                   {message.delivery ? <div className="flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
                     <span>{message.delivery === 'sending' ? '等待回复…' : message.delivery === 'cancelled' ? '已停止等待' : '未完成，请重新发送'}</span>
                     {message.delivery !== 'sending' ? <Button size="sm" variant="ghost" className="h-6 px-1 text-xs" disabled={sending}
@@ -286,40 +644,87 @@ export function AgentPanel({
                 </div>
               </div>
             ) : (
-              <div key={message.id} className="space-y-1">
-                {/* 来源标签：这条回复是真实 Agent 跑的，还是本地命令解析器给的。 */}
-                <Badge variant="outline" className="font-normal text-muted-foreground">
-                  {sourceLabel(sourceModeForResult(message.result?.mode, sources[message.id]), message.result?.provider)}
-                </Badge>
-                {message.result ? (
-                  <AgentResultView
-                    result={message.result}
-                    onConfirm={(token, drafts) => void confirm(token, drafts)}
-                    onCancel={(token) => void cancel(token)}
-                    onSend={(text, target) => void send(text, target)}
-                    confirming={confirming}
-                    disabledTokens={disabledTokens}
-                  />
-                ) : (
-                  <p className="text-sm text-muted-foreground">{message.content}</p>
-                )}
+              <div key={message.id} ref={message.id === pendingPreview?.id ? pendingPreviewRef : undefined} className="flex items-start gap-3">
+                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/15 bg-primary/5 text-primary">
+                  <Bot className="size-4" />
+                </div>
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2 px-1">
+                    <span className="text-xs font-semibold text-foreground">PrinceQ</span>
+                    <Badge variant="outline" className="h-5 font-normal text-[10px] text-muted-foreground">
+                      {sourceLabel(sourceModeForResult(message.result?.mode, sources[message.id]), message.result?.provider)}
+                    </Badge>
+                  </div>
+                  <div className="rounded-2xl rounded-tl-md border border-border/70 bg-card p-4 shadow-sm">
+                    {message.result ? (
+                      <AgentResultView
+                        result={message.result}
+                        onConfirm={(token, drafts) => void confirm(token, drafts)}
+                        onCancel={(token) => void cancel(token)}
+                        onSend={(text, target) => void send(text, target)}
+                        confirming={confirming}
+                        disabledTokens={disabledTokens}
+                      />
+                    ) : (
+                      <p className="whitespace-pre-wrap break-words text-[14px] leading-6 text-foreground">{message.content}</p>
+                    )}
+                  </div>
+                </div>
               </div>
             ),
           )}
 
           {sending ? (
-            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 className="size-3 animate-spin" />
-              {effectiveMode === 'agent' ? 'Agent 正在处理（可随时取消）…' : '正在匹配本地命令…'}
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-6 px-2 text-xs"
-                onClick={() => abortRef.current?.abort()}
-              >
-                <Square className="size-3" />
-                取消
-              </Button>
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/15 bg-primary/5 text-primary">
+                <Loader2 className="size-4 animate-spin" />
+              </div>
+              <div className="min-w-0 flex-1 rounded-2xl rounded-tl-md border border-border/70 bg-card p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-foreground">
+                      {effectiveMode === 'agent' ? 'Agent 正在处理' : '正在处理请求'}
+                    </p>
+                    <p role="status" className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {effectiveMode === 'agent' ? agentProgress?.message ?? '正在启动进度跟踪…' : '正在匹配本地命令…'}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" className="h-7 shrink-0 px-2.5 text-xs" onClick={() => abortRef.current?.abort()}>
+                    <Square className="size-3" />
+                    取消
+                  </Button>
+                </div>
+                {effectiveMode === 'agent' ? (
+                  <>
+                    <ol className="mt-3 grid gap-x-4 gap-y-2 border-t border-border/70 pt-3 sm:grid-cols-2">
+                      {AGENT_PROGRESS_STEPS.map((step,index)=>{
+                        const current=AGENT_PROGRESS_INDEX[agentProgress?.phase ?? 'checking'] ?? -1;
+                        const complete=current>index;
+                        const active=current===index;
+                        return <li key={step.phase} aria-current={active?'step':undefined}
+                          className={cn('flex items-center gap-2 text-xs',complete||active?'text-foreground':'text-muted-foreground')}>
+                          <span aria-hidden="true" className={cn('flex size-4 shrink-0 items-center justify-center rounded-full text-[10px]',complete?'bg-primary/10 text-primary':active?'bg-primary text-primary-foreground':'border border-border')}>
+                            {complete?'✓':active?<span className="size-1.5 rounded-full bg-current"/>:''}
+                          </span>
+                          {step.label}
+                        </li>;
+                      })}
+                    </ol>
+                    {agentProgress?.summary_text ? (
+                      <div className="mt-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5">
+                        <p className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+                          <Sparkles className="size-3" />处理摘要
+                        </p>
+                        <AgentSummary
+                          key={agentProgress.request_id}
+                          text={agentProgress.summary_text}
+                          generating={agentProgress.phase !== 'complete' && agentProgress.phase !== 'failed'}
+                        />
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
@@ -356,25 +761,36 @@ export function AgentPanel({
         </div>
       </ScrollArea>}
 
+      {!historyOpen && pendingPreview && messages.at(-1)?.id !== pendingPreview.id ? (
+        <div className="flex shrink-0 items-center gap-2 border-t border-amber-200 bg-amber-50 px-3 py-2">
+          <p className="min-w-0 flex-1 text-xs text-amber-900">有一份建议等待确认，尚未执行。</p>
+          <Button size="sm" variant="outline" onClick={() => pendingPreviewRef.current?.scrollIntoView({behavior: 'smooth', block: 'end'})}>查看并确认</Button>
+        </div>
+      ) : null}
+
       <Separator />
 
       <form
         className="shrink-0 p-3"
         onSubmit={(event) => {
           event.preventDefault();
-          void send(input);
+          sendCurrentInput();
         }}
       >
         <div className="rounded-lg border border-border bg-card! focus-within:border-primary/50">
           <Textarea
-            disabled={sessionLoading || historyOpen}
+            disabled={sessionLoading || historyOpen || recording || voiceBusy}
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => {
+              if(voiceRefining)cancelVoiceInput('已保留你编辑的文字，停止后台识别。');
+              if(event.target.value!==voiceDraftRef.current)voiceDraftRef.current=null;
+              setInput(event.target.value);
+            }}
             onKeyDown={(event) => {
               // Enter sends, Shift+Enter breaks the line.
               if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
-                void send(input);
+                sendCurrentInput();
               }
             }}
             placeholder="可以让它给出队列、创建任务、确认象限…"
@@ -383,13 +799,46 @@ export function AgentPanel({
           />
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
             <Badge variant="outline" className="font-normal text-muted-foreground">
-              回车发送，Shift+回车换行
+              回车发送 · Shift+回车换行
             </Badge>
-            <Button type="submit" size="icon" disabled={!input.trim() || sending || confirming || sessionLoading || historyOpen}>
-              {sending ? <Loader2 className="animate-spin" /> : <ArrowUp />}
-              <span className="sr-only">发送</span>
-            </Button>
+            <div className="flex items-center gap-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    tabIndex={voiceButtonDisabled?0:undefined}
+                    aria-label={voiceButtonDisabled?'语音输入不可用':undefined}
+                    aria-describedby={voiceDescription?voiceStatusId:undefined}>
+                    <Button type="button" size="icon" variant={recording?'destructive':voiceCanCancel?'outline':'ghost'}
+                      disabled={voiceButtonDisabled}
+                      onClick={()=>void toggleVoiceCapture()} aria-label={voiceActionLabel}
+                      aria-describedby={voiceDescription?voiceStatusId:undefined}>
+                      {voiceBusy||voiceStarting||voiceRefining?<Loader2 className="animate-spin"/>:<Mic className={recording?'animate-pulse':''}/>}
+                      <span className="sr-only">{voiceActionLabel}</span>
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-72">{voiceDisabledReason || (voiceRefining?'文字已可发送，再次点击麦克风停止后台识别':recording?'手动结束录音；说话后静音 1 秒会自动结束':'本地 Qwen 实时语音转写；说话后静音 1 秒自动结束')}</TooltipContent>
+              </Tooltip>
+              <Button type="submit" size="icon" disabled={!input.trim() || recording || voiceStarting || sending || confirming || sessionLoading || historyOpen || voiceBusy}>
+                {sending ? <Loader2 className="animate-spin" /> : <ArrowUp />}
+                <span className="sr-only">发送</span>
+              </Button>
+            </div>
           </div>
+        </div>
+        {voiceDescription?<p id={voiceStatusId} role="status" className={cn('mt-1.5 text-xs',voiceDisabledReason?'text-amber-700':'text-muted-foreground')}>{voiceDescription}</p>:null}
+        {voiceStarting||voiceBusy||voiceRefining?<Button type="button" size="sm" variant="outline" className="mt-2"
+          onClick={()=>cancelVoiceInput('已取消语音识别，可以重新录音；输入框中的文字已保留。')}>
+          <Square className="size-3"/>{voiceStarting?'取消启动录音':voiceBusy?'取消识别':'停止后台识别'}
+        </Button>:null}
+        {speechStatus?<p role="status" className="mt-1.5 text-xs text-muted-foreground">{speechStatus}</p>:null}
+        {speechBusy?<Button type="button" size="sm" variant="outline" className="mt-2"
+          onClick={()=>cancelSpeechWork('已停止生成回复语音，可以继续录音或输入。')}>
+          <Square className="size-3"/>停止生成语音
+        </Button>:null}
+        {speechUrl?<audio className="mt-2 h-8 w-full" controls autoPlay src={speechUrl} aria-label="助手语音回复"/>:null}
+        <div className="mt-2 border-t border-border pt-1">
+          <SkillDownloadButton />
         </div>
       </form>
     </aside>

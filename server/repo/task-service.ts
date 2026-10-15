@@ -11,6 +11,8 @@ import type {
   TaskAction,
   TaskStatus,
 } from '../../shared/types.ts';
+import type { RecurrenceInput } from '../../shared/recurrence.ts';
+import { configureRecurrence, validateRecurrence } from './recurrence.ts';
 import { TASK_STATUSES } from '../../shared/types.ts';
 import { durationToMinutes } from '../../shared/duration.ts';
 import { get, run, type Db, type Row } from '../db/connection.ts';
@@ -27,6 +29,7 @@ import { newId, nowIso } from '../lib/ids.ts';
 import { findTask } from './tasks.ts';
 
 export interface CreateTaskInput {
+  recurrence?: RecurrenceInput;
   title: string;
   description?: string | null;
   goal_id?: string | null;
@@ -114,6 +117,7 @@ function resolveDuration(value: number, unit: DurationUnit): ResolvedDuration {
  *    having it recomputed here.
  */
 export function createTask(db: Db, input: CreateTaskInput): Task {
+  if (input.recurrence) validateRecurrence(db, input.goal_id ?? null, input.recurrence);
   const goalTitle = input.goal_id
     ? (get<Row>(db, 'SELECT title FROM goals WHERE id = ?', [input.goal_id])?.title ?? null)
     : null;
@@ -237,6 +241,8 @@ export function createTask(db: Db, input: CreateTaskInput): Task {
     ],
   );
 
+  if (input.recurrence) configureRecurrence(db, id, input.recurrence);
+
   for (const dependencyId of input.depends_on ?? []) {
     if (!findTask(db, dependencyId)) {
       throw notFound(`Cannot depend on unknown task "${dependencyId}".`);
@@ -323,6 +329,7 @@ export function updateTask(db: Db, id: string, input: UpdateTaskInput): Task {
     );
   }
 
+  if ('goal_id' in input && current.recurrence) validateRecurrence(db, input.goal_id as string | null, current.recurrence);
   const duration = durationAssignments(input);
   const assignments: string[] = [...duration.assignments];
   const params: (string | number | null)[] = [...duration.params];
@@ -481,6 +488,7 @@ function restoreTargetFromHistory(db: Db, taskId: string): TaskStatus {
  */
 export function applyAction(db: Db, id: string, input: ActionInput): Task {
   const task = requireTask(db, id);
+  if (task.recurrence && input.action === 'complete') throw conflict('循环任务请完成当日执行记录；整个循环需到结束日后单独结束');
   if (input.expected_version != null && input.expected_version !== task.version) {
     throw conflict(
       `任务已被其他写入修改（期望版本 ${input.expected_version}，实际 ${task.version}），请重新读取后再操作。`,

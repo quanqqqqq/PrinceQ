@@ -1,3 +1,4 @@
+import { recurrenceDue } from '../../shared/recurrence.ts';
 /**
  * Work-queue ranking.
  *
@@ -305,7 +306,7 @@ export interface RankedTask {
  * creation time, so ordering is stable across recalculations.
  */
 export function rankTasks(tasks: Task[], habits: HabitContext, at = now()): RankedTask[] {
-  const queueable = tasks.filter((t) => QUEUEABLE.has(t.status));
+  const queueable = tasks.filter((t) => QUEUEABLE.has(t.status) && recurrenceDue(t.recurrence));
   const ctx = buildScoringContext(tasks, habits, at);
 
   const scored = queueable.map((task) => ({ task, breakdown: scoreTask(task, ctx) }));

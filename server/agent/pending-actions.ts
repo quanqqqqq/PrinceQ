@@ -10,6 +10,7 @@
  * 同理，标题解析要求**唯一命中**——多命中或零命中一律跳过并说明，绝不猜一个。
  */
 import { z } from 'zod';
+import { recurrenceSchema } from '../http/schemas.ts';
 import { AGENT_ACTOR_ID, DEFAULT_ACTOR_ID } from '../config.ts';
 import { get, run, type Db, type Row } from '../db/connection.ts';
 import { addExplicitHabit } from '../domain/habits.ts';
@@ -43,6 +44,7 @@ export const pendingActionSchema = z.union([skillOperationSchema, z.discriminate
     target_date_iso: z.string().trim().max(40).nullish(),
     tasks: z.array(z.strictObject({
       title: z.string().trim().min(1).max(200),
+      recurrence: recurrenceSchema.optional(),
       description: z.string().trim().min(1).max(4000),
       deadline_iso: z.string().trim().max(40).nullish(),
       minutes: z.number().int().min(1).max(10000).nullish(),
@@ -194,6 +196,7 @@ export function confirmPendingActions(
             for (const draft of action.tasks) {
               const task = createTask(db, {
                 title: draft.title,
+                recurrence: draft.recurrence,
                 description: draft.description,
                 deadline: draft.deadline_iso ?? null,
                 estimated_minutes: draft.minutes ?? null,

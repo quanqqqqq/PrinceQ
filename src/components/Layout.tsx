@@ -1,3 +1,4 @@
+import {TaskExecutionProvider} from '@/components/TaskExecutionProvider';
 /**
  * 应用外壳：左侧固定导航、顶部紧凑栏，助手面板在桌面宽度下停靠右侧、窄屏下
  * 以抽屉打开。
@@ -484,7 +485,7 @@ function Shell() {
 
 export const Layout = () => (
   <WorkspaceProvider>
-    <AgentConversationProvider><Shell /></AgentConversationProvider>
+    <AgentConversationProvider><TaskExecutionProvider><Shell /></TaskExecutionProvider></AgentConversationProvider>
     <Toaster />
   </WorkspaceProvider>
 );

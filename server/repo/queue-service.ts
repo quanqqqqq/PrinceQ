@@ -1,3 +1,4 @@
+import { recurrenceDue, calendarDate } from '../../shared/recurrence.ts';
 /** Queue snapshot persistence — writes explainable ranking records. */
 import type {
   QueueEntry,
@@ -107,6 +108,11 @@ export function listSnapshots(db: Db, limit = 25): QueueSnapshot[] {
 /** Reads the current queue, recalculating on first use when no snapshot exists. */
 export function readQueue(db: Db): QueueResponse {
   const snapshot = latestSnapshot(db);
+  // A calendar boundary can make a recurring task due without any write.
+  if (snapshot && listTasks(db).some(task=>task.recurrence && (calendarDate(snapshot.created_at,task.recurrence.timezone)!==task.recurrence.today || (recurrenceDue(task.recurrence)&&!['completed','archived'].includes(task.status)&&!get(db,'SELECT 1 FROM queue_entries WHERE snapshot_id=? AND task_id=?',[snapshot.id,task.id]))))) {
+    const refreshed=refreshQueue(db,'recurrence-new-day');
+    return {snapshot:refreshed.snapshot!,entries:refreshed.entries};
+  }
   if (!snapshot) {
     const refreshed = refreshQueue(db, 'initial-read');
     return { snapshot: refreshed.snapshot!, entries: refreshed.entries };
@@ -121,7 +127,7 @@ export function readQueue(db: Db): QueueResponse {
   const entries: QueueEntry[] = [];
   for (const row of taskRows) {
     const task = findTask(db, row.task_id);
-    if (!task) continue; // Task deleted after the snapshot was taken.
+    if (!task || !recurrenceDue(task.recurrence)) continue; // Current recurrence state wins over old snapshots.
     entries.push({
       position: row.position,
       score: row.score,

@@ -142,6 +142,7 @@ export interface TaskAssignment {
 }
 
 export interface Task {
+  recurrence?: import('./recurrence.ts').TaskRecurrence | null;
   id: string;
   title: string;
   description: string | null;

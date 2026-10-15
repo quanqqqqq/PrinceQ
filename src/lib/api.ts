@@ -1,3 +1,5 @@
+import type { RecurrenceInput, TaskRecurrence } from '@shared/recurrence';
+import type { TaskAssistanceDetail } from '@shared/task-assistance';
 /**
  * Typed client for the local work-queue API.
  *
@@ -117,6 +119,7 @@ export interface TaskDetail {
 }
 
 export interface CreateTaskInput {
+  recurrence?: RecurrenceInput;
   title: string;
   description?: string;
   goal_id?: string;
@@ -156,6 +159,21 @@ export const api = {
       `/tasks${query ? `?${query}` : ''}`,
     );
   },
+
+  recurrence: (id:string)=>request<{recurrence:TaskRecurrence|null}>(`/tasks/${id}/recurrence`),
+  configureRecurrence:(id:string,body:RecurrenceInput & {expected_version:number})=>request(`/tasks/${id}/recurrence`,{method:'POST',body,idempotency:'recurrence-configure'}),
+  recurrenceControl:(id:string,action:'pause'|'resume'|'finish',expected_version:number)=>request(`/tasks/${id}/recurrence/control`,{method:'POST',body:{action,expected_version},idempotency:'recurrence-control'}),
+  occurrenceAction:(id:string,body:{date:string;action:'open'|'start'|'complete'|'skip'|'reopen';note?:string;expected_version:number})=>request(`/tasks/${id}/occurrences/actions`,{method:'POST',body,idempotency:'occurrence-action'}),
+  taskAssistanceProgress:(id:string,key:string)=>request<import('@shared/types').AgentProgressView|null>(`/tasks/${id}/assistance/progress/${encodeURIComponent(key)}`),
+  resolveTaskPreview:(id:string,token:string,action:'confirm'|'cancel')=>request<TaskAssistanceDetail>(`/tasks/${id}/assistance/previews/${encodeURIComponent(token)}/${action}`,{method:'POST',body:action==='confirm'?{confirmed:true}:{},idempotency:'task-preview-'+action}),
+  taskAssistance:(id:string)=>request<TaskAssistanceDetail>(`/tasks/${id}/assistance`),
+  sendTaskAssistance:async(id:string,message:string,key:string):Promise<TaskAssistanceDetail>=>{
+    const response=await fetch(`/api/tasks/${id}/assistance/messages`,{method:'POST',headers:{'content-type':'application/json','Idempotency-Key':key},body:JSON.stringify({message})});
+    const payload=await response.json() as TaskAssistanceDetail & {error?:{code?:string;message?:string}};
+    if(!response.ok)throw new ApiRequestError(response.status,payload.error?.code??'unknown',payload.error?.message??'任务协助失败');
+    return payload;
+  },
+  acceptTaskAssistance:(id:string,revision:number,expected_version:number)=>request(`/tasks/${id}/assistance/accept`,{method:'POST',body:{revision,expected_version},idempotency:'assistance-accept'}),
 
   getTask: (id: string) => request<TaskDetail>(`/tasks/${id}`),
 

@@ -7,6 +7,7 @@ export function deleteTask(db:Db,id:string,expectedVersion?:number) {
   const task=findTask(db,id);if(!task)throw notFound('任务不存在');
   if(expectedVersion!==undefined&&expectedVersion!==task.version)throw conflict('任务版本已改变');
   const neighbours=[...new Set([...task.depends_on,...task.blocks])];
+  run(db,"UPDATE agent_pending_actions SET status='cancelled',resolved_at=? WHERE status='pending' AND token IN (SELECT token FROM task_assistance_previews WHERE task_id=?)",[nowIso(),id]);
   run(db,'DELETE FROM rescoring_requests WHERE task_id = ?',[id]);
   run(db,'DELETE FROM tasks WHERE id = ?',[id]);
   for(const other of neighbours)run(db,'UPDATE tasks SET version = version + 1, updated_at = ? WHERE id = ?',[nowIso(),other]);

@@ -15,6 +15,11 @@ const version = z.number().int().positive().optional();
 const empty = z.strictObject({});
 const deleteBody = z.strictObject({expected_version:version});
 export const SKILL_OPERATIONS: OperationDefinition[] = [
+  {name:'task.recurrence.update',label:'调整循环计划',method:'POST',path:'/api/tasks/:id/recurrence/update',target:'task',schema:S.recurrenceUpdateSchema},
+  {name:'task.recurrence.configure',label:'设置循环任务',method:'POST',path:'/api/tasks/:id/recurrence',target:'task',schema:S.recurrenceConfigureSchema},
+  {name:'task.recurrence.control',label:'暂停、恢复或结束循环',method:'POST',path:'/api/tasks/:id/recurrence/control',target:'task',schema:S.recurrenceControlSchema},
+  {name:'task.occurrence.action',label:'记录单次循环执行',method:'POST',path:'/api/tasks/:id/occurrences/actions',target:'task',schema:S.occurrenceActionSchema},
+  {name:'task.assistance.accept',label:'采纳AI产出并完成任务或本次执行',method:'POST',path:'/api/tasks/:id/assistance/accept',target:'task',schema:S.assistanceAcceptSchema},
   {name:'task.create',label:'新建任务',method:'POST',path:'/api/tasks',schema:S.createTaskSchema.strict()},
   {name:'task.update',label:'编辑任务',method:'PATCH',path:'/api/tasks/:id',target:'task',schema:S.updateTaskSchema.strict()},
   {name:'task.delete',label:'永久删除任务',method:'DELETE',path:'/api/tasks/:id',target:'task',schema:deleteBody},
@@ -63,10 +68,10 @@ export const skillOperationSchema = z.strictObject({
 export type SkillOperation = z.infer<typeof skillOperationSchema>;
 export function definitionFor(call:SkillOperation) {const def=SKILL_OPERATIONS.find(item=>item.name===call.operation);if(!def) throw badRequest('不支持的 PrinceQ 操作');return def;}
 export function skillCatalog() {
-  return {name:'personal-work-queue',product:'PrinceQ',version:2,auth:{mode:'none',authorization_hook:'authorizePrinceQRequest'},
+  return {name:'personal-work-queue',product:'PrinceQ',version:4,auth:{mode:'none',authorization_hook:'authorizePrinceQRequest'},
     confirmation_required:true, max_batch_actions:20, action_keys:['action','operation','target_id','payload'],
     ignored_display_metadata:['display_title'], server_owned_metadata:['preconditions'],
-    reads:['GET /api/tasks','GET /api/tasks/:id','GET /api/goals','GET /api/goals/:id','GET /api/queue','GET /api/queue/explain/:id','GET /api/activity','GET /api/settings','GET /api/rescoring-requests','GET /api/skills/princeq/context'],
+    reads:['GET /api/tasks/:id/recurrence','GET /api/tasks/:id/assistance','GET /api/tasks','GET /api/tasks/:id','GET /api/goals','GET /api/goals/:id','GET /api/queue','GET /api/queue/explain/:id','GET /api/activity','GET /api/settings','GET /api/rescoring-requests','GET /api/skills/princeq/context'],
     previews:['POST /api/goals/:id/decomposition/preview','POST /api/settings/weights/preview'],
     operations:SKILL_OPERATIONS.map(({schema,...def})=>({...def,requires_target_id:def.path.includes(':id'),target_id_aliases:!def.path.includes(':id')&&def.target==='settings'?['settings','personal']:[],payload_schema:z.toJSONSchema(schema,{io:'input',unrepresentable:'any'})}))};
 }
@@ -78,6 +83,12 @@ function fingerprint(db:Db,resource:Resource,id:string):string {
   if (resource==='rescoring') {const row=get<Row>(db,'SELECT * FROM rescoring_requests WHERE id = ?',[id]);if(!row)throw notFound('复评请求已不存在');return JSON.stringify(row);}
   const row=get<Row>(db,'SELECT * FROM pending_previews WHERE token = ?',[id]);if(!row) throw notFound('目标拆分预览已不存在');return JSON.stringify(row);
 }
+export function operationVersion(db:Db,call:SkillOperation):number|undefined {
+  const task=call.target_id?findTask(db,call.target_id):null;
+  if(['task.recurrence.update','task.recurrence.control'].includes(call.operation))return task?.recurrence?.version;
+  if(call.operation==='task.occurrence.action')return task?.recurrence?.occurrences.find(item=>item.date===call.payload.date)?.version;
+  return task?.version??(call.target_id?findGoal(db,call.target_id)?.version:undefined);
+}
 export function prepareSkillOperation(db:Db,input:SkillOperation):SkillOperation {
   const call=skillOperationSchema.parse(input),def=definitionFor(call);
   call.payload=def.schema.parse(call.payload) as Record<string,unknown>;
@@ -88,9 +99,9 @@ export function prepareSkillOperation(db:Db,input:SkillOperation):SkillOperation
   if(def.target && def.target!=='settings')add(def.target,call.target_id!);
   if(def.target==='settings' || call.operation==='task.create' || call.operation==='task.quadrant.resuggest' || 'duration_value' in call.payload) add('settings','personal');
   if((def.target==='task'||def.target==='goal') && call.payload.expected_version!==undefined){
-    const current=def.target==='task'?findTask(db,call.target_id!):findGoal(db,call.target_id!);
-    if(current?.version!==call.payload.expected_version)throw conflict('对象已改变，请重新读取后生成预览');
+    if(operationVersion(db,call)!==call.payload.expected_version)throw conflict('对象已改变，请重新读取后生成预览');
   }
+  if(call.operation.startsWith('task.recurrence.')&&call.target_id){const goalId=findTask(db,call.target_id)?.goal_id;if(goalId)add('goal',goalId);}
   if(typeof call.payload.goal_id==='string')add('goal',call.payload.goal_id);
   for(const id of Array.isArray(call.payload.depends_on)?call.payload.depends_on:[])if(typeof id==='string')add('task',id);
   if(typeof call.payload.depends_on_id==='string')add('task',call.payload.depends_on_id);
@@ -109,13 +120,14 @@ export function checkSkillPreconditions(db:Db,calls:SkillOperation[]) {
     if(fingerprint(db,guard.resource,guard.id)!==guard.fingerprint)throw conflict('预览生成后数据已改变，请取消旧预览并重新生成');
   }
 }
-const FIELD_LABELS:Record<string,string>={title:'名称',description:'说明',deadline:'截止时间',estimated_minutes:'预计分钟',duration_value:'耗时数值',duration_unit:'耗时单位',goal_id:'关联目标',target_date:'目标日期',status:'目标状态',manual_priority:'优先级',manual_override:'排序调整',task_type:'工作类型',cognitive_load:'认知负荷',importance_score:'重要程度',urgency_score:'紧急程度',reason:'原因',source:'评分来源',confidence:'置信度',action:'状态操作',depends_on_id:'依赖任务',depends_on:'依赖任务',statement:'工作习惯',enabled:'启用',kind:'类型',value:'约束值',weights:'排序权重',preferred_task_types:'偏好类型',peak_hours:'通用工作时段',task_type_peak_hours:'各类工作时段',hours_per_day:'每日换算小时',days_per_month:'每月换算工作日',color:'颜色',accepted_titles:'选定任务',accepted_drafts:'编辑后的拆分任务',changed_axes:'复评轴',target_quadrant:'目标象限',agent_name:'建议来源',actor_id:'分配对象'};
+const FIELD_LABELS:Record<string,string>={title:'名称',description:'说明',deadline:'截止时间',estimated_minutes:'预计分钟',duration_value:'耗时数值',duration_unit:'耗时单位',goal_id:'关联目标',target_date:'目标日期',status:'目标状态',manual_priority:'优先级',manual_override:'排序调整',task_type:'工作类型',cognitive_load:'认知负荷',importance_score:'重要程度',urgency_score:'紧急程度',reason:'原因',source:'评分来源',confidence:'置信度',action:'状态操作',depends_on_id:'依赖任务',depends_on:'依赖任务',statement:'工作习惯',enabled:'启用',kind:'类型',value:'约束值',weights:'排序权重',preferred_task_types:'偏好类型',peak_hours:'通用工作时段',task_type_peak_hours:'各类工作时段',hours_per_day:'每日换算小时',days_per_month:'每月换算工作日',color:'颜色',recurrence:'循环计划',date:'执行日期',start_date:'起始日期',interval:'间隔数量',unit:'周期单位',start_time:'首次执行时间',end_mode:'结束方式',end_date:'结束日期',timezone:'时区',revision:'产出版本',accepted_titles:'选定任务',accepted_drafts:'编辑后的拆分任务',changed_axes:'复评轴',target_quadrant:'目标象限',agent_name:'建议来源',actor_id:'分配对象'};
 const ACTION_LABELS:Record<string,string>={claim:'领取',release:'释放',start:'开始',block:'标记受阻',unblock:'解除受阻',complete:'完成',archive:'归档',restore:'恢复归档',reopen:'重新打开'};
 export function describeSkillOperation(db:Db,call:SkillOperation):string {
   const def=definitionFor(call);
   const entity=def.target==='task'?findTask(db,call.target_id!):def.target==='goal'?findGoal(db,call.target_id!):null;
   const title=entity?displayDemoText(entity.title,entity.is_demo):String(call.payload.title??call.payload.statement??'');
   const fields=Object.entries(call.payload).filter(([key])=>!['expected_version','expected_explicit_version','preview_token'].includes(key)).map(([key,value])=>{
+    if(key==='recurrence'&&value&&typeof value==='object') {const r=value as Record<string,unknown>;return `循环：从 ${r.start_date} 起每 ${r.interval} ${{hour:"小时",day:"天",week:"周",month:"月"}[String(r.unit)]??r.unit}，${r.end_mode==='goal'?'随目标日期结束':'到 '+r.end_date}（${r.timezone}）；每次单独记录，完成单次不结束整个循环`; }
     if(key==='actor_id')return `分配对象：${get<Row>(db,'SELECT display_name FROM actors WHERE id = ?',[String(value)])?.display_name??value}`;
     if(key==='action')return `操作：${ACTION_LABELS[String(value)]??value}`;
     if((key==='goal_id'||key==='depends_on_id')&&typeof value==='string')return `${FIELD_LABELS[key]}：${findGoal(db,value)?.title??findTask(db,value)?.title??value}`;

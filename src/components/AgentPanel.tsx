@@ -1,3 +1,5 @@
+import {captureToWav,releaseVoiceCapture,microphoneErrorMessage,type VoiceCapture} from '@/lib/voice-capture';
+import {claimVoiceInput,releaseVoiceInput,onVoiceInputStart} from '@/lib/voice-input-ownership';
 /**
  * 常驻助手面板。调用 POST /api/agent/message——一个确定性的本地命令接口，
  * 不涉及任何模型；面板里的文案也如实这么说明。
@@ -95,94 +97,6 @@ interface Recommendation {
   command: string;
 }
 
-interface VoiceCapture {
-  controller: AbortController;
-  stream: MediaStream;
-  context: AudioContext;
-  source: MediaStreamAudioSourceNode;
-  processor: ScriptProcessorNode;
-  sink: GainNode;
-  sampleRate: number;
-  chunks: Float32Array[];
-  partialBusy: boolean;
-  partialTimer: number | null;
-  partialRequest: Promise<string> | null;
-  partialSampleCount: number;
-  lastTranscript: string;
-  silenceDetector: VoiceSilenceDetector;
-}
-
-function releaseVoiceCapture(capture: VoiceCapture, abortRecognition=true): void {
-  if(abortRecognition)capture.controller.abort();
-  if (capture.partialTimer!==null) window.clearInterval(capture.partialTimer);
-  capture.processor.onaudioprocess=null;
-  capture.processor.disconnect();
-  capture.source.disconnect();
-  capture.sink.disconnect();
-  capture.stream.getTracks().forEach(track=>track.stop());
-  void capture.context.close().catch(()=>{});
-}
-
-function microphoneErrorMessage(cause: unknown): string {
-  if (cause instanceof Error) {
-    switch (cause.name) {
-      case 'NotAllowedError':
-      case 'SecurityError':
-        return '麦克风权限被拒绝，请在浏览器或系统设置中允许此页面使用麦克风，再重试。';
-      case 'NotFoundError':
-        return '没有找到可用的麦克风，请连接麦克风并检查系统的声音输入设置。';
-      case 'NotReadableError':
-        return '无法读取麦克风，设备可能被其他应用占用或发生故障；请检查后重试。';
-      case 'AbortError':
-        return '麦克风启动被中断，请再试一次。';
-      default:
-        return cause.message || '麦克风启动失败，请检查麦克风权限和声音输入设置。';
-    }
-  }
-  return '麦克风启动失败，请检查麦克风权限和声音输入设置。';
-}
-
-function encodePcmWav(samples: Float32Array, sampleRate: number): Blob {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-  const write = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i));
-  };
-  write(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); write(8, 'WAVE'); write(12, 'fmt ');
-  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true); view.setUint16(34, 16, true); write(36, 'data');
-  view.setUint32(40, samples.length * 2, true);
-  let offset = 44;
-  for (const sample of samples) {
-    const clipped = Math.max(-1, Math.min(1, sample));
-    view.setInt16(offset, clipped < 0 ? clipped * 32768 : clipped * 32767, true);
-    offset += 2;
-  }
-  return new Blob([buffer], {type: 'audio/wav'});
-}
-
-function resampleMono(input: Float32Array, inputRate: number, outputRate: number): Float32Array {
-  if (inputRate === outputRate) return input;
-  const ratio = inputRate / outputRate;
-  const output = new Float32Array(Math.floor(input.length / ratio));
-  for (let i = 0; i < output.length; i += 1) {
-    const start = Math.floor(i * ratio);
-    const end = Math.min(input.length, Math.floor((i + 1) * ratio));
-    let sum = 0;
-    for (let j = start; j < end; j += 1) sum += input[j];
-    output[i] = sum / Math.max(1, end - start);
-  }
-  return output;
-}
-
-function captureToWav(capture: VoiceCapture): Blob {
-  const samples=new Float32Array(capture.chunks.reduce((count,chunk)=>count+chunk.length,0));
-  let cursor=0;
-  for(const chunk of capture.chunks){samples.set(chunk,cursor);cursor+=chunk.length;}
-  return encodePcmWav(resampleMono(samples,capture.sampleRate,16000),16000);
-}
-
 /**
  * 从当前真实队列动态生成推荐示例（UX-11）。
  *
@@ -254,6 +168,7 @@ export function AgentPanel({
   useEffect(() => {
     if (isOpen) void refreshConversation(sessionId);
   }, [isOpen, sessionId, refreshConversation]);
+  const voiceOwnerRef=useRef(Symbol('global-agent-voice'));
   const captureRef=useRef<VoiceCapture|null>(null);
   const voiceDraftRef=useRef<string|null>(null);
   const speechUrlRef=useRef<string|null>(null);
@@ -317,6 +232,7 @@ export function AgentPanel({
   }, [isOpen, historyOpen, sessionLoading, sessionId, messages, sending]);
   useEffect(()=>{onStatusChange?.({messageCount:messages.length,sending});},[messages.length,sending,onStatusChange]);
   const cancelVoiceInput=useCallback((status='')=>{
+    releaseVoiceInput(voiceOwnerRef.current);
     voiceGenerationRef.current++;
     voiceAbortRef.current?.abort();voiceAbortRef.current=null;
     const capture=captureRef.current;
@@ -335,6 +251,7 @@ export function AgentPanel({
   const cancelVoiceWork=useCallback((status='')=>{
     cancelVoiceInput(status);cancelSpeechWork();
   },[cancelVoiceInput,cancelSpeechWork]);
+  useEffect(()=>onVoiceInputStart(()=>cancelSpeechWork()),[cancelSpeechWork]);
   // A new/switching conversation cancels its predecessor's work. Each async
   // callback also checks its generation so late responses cannot alter drafts.
   useEffect(()=>()=>cancelVoiceWork(),[voiceScopeVersion,cancelVoiceWork]);
@@ -389,6 +306,7 @@ export function AgentPanel({
       // Stop prior reply audio before a new recording so it cannot be captured
       // as microphone input or keep the shared model queue occupied.
       cancelSpeechWork();
+      claimVoiceInput(voiceOwnerRef.current,()=>cancelVoiceInput('已切换语音输入，本次识别已停止；已识别文字保留。'));
       const generation=voiceGenerationRef.current;
       const controller=new AbortController();
       voiceAbortRef.current=controller;setVoiceStarting(true);
@@ -435,6 +353,7 @@ export function AgentPanel({
         stream?.getTracks().forEach(track=>track.stop());
         if(context)void context.close().catch(()=>{});
         if(current){
+          releaseVoiceInput(voiceOwnerRef.current);
           voiceAbortRef.current=null;
           setVoiceStatus(`语音输入无法启动：${microphoneErrorMessage(cause)}`);
         }
@@ -494,7 +413,7 @@ export function AgentPanel({
       }
     }finally{
       clearTimeout(deadline);
-      if(voiceAbortRef.current===controller){voiceAbortRef.current=null;setVoiceBusy(false);setVoiceRefining(false);}
+      if(voiceAbortRef.current===controller){releaseVoiceInput(voiceOwnerRef.current);voiceAbortRef.current=null;setVoiceBusy(false);setVoiceRefining(false);}
     }
   }
 

@@ -33,7 +33,11 @@ button[data-slot$="-trigger"],
 button[data-slot="popover-trigger"],
 button[data-slot="select-trigger"] { font-weight: 400; }
 
-.princeq-app .task-card .task-card-actions button {
+/* Cards also render in Radix portals, outside the app shell. */
+.task-card { font-size: 14px; line-height: 1.5; }
+.task-card-description { font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+
+.task-card .task-card-actions button {
   height: 30px;
   min-height: 30px;
   padding: 4px 10px;
@@ -41,17 +45,17 @@ button[data-slot="select-trigger"] { font-weight: 400; }
   font-size: 13px;
   line-height: 18px;
 }
-.princeq-app .task-card .task-card-actions button:not(.bg-primary) { font-weight: 400; }
-.princeq-app .task-card .task-card-actions button svg { width: 14px; height: 14px; }
+.task-card .task-card-actions button:not(.bg-primary) { font-weight: 400; }
+.task-card .task-card-actions button svg { width: 14px; height: 14px; }
 /* One calm metadata row, with wrapping that keeps each fact together. */
-.princeq-app .task-card-meta {
+.task-card-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 18px;
 }
-.princeq-app .task-card-meta-item { min-width: 0; max-width: 100%; }
-.princeq-app .task-card-meta dd {
+.task-card-meta-item { min-width: 0; max-width: 100%; }
+.task-card-meta dd {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -60,15 +64,15 @@ button[data-slot="select-trigger"] { font-weight: 400; }
   font-size: 12px;
   line-height: 18px;
 }
-.princeq-app .task-card-meta dd > svg { flex-shrink: 0; width: 13px; height: 13px; }
-.princeq-app .task-card .task-card-meta [data-slot="badge"] {
+.task-card-meta dd > svg { flex-shrink: 0; width: 13px; height: 13px; }
+.task-card .task-card-meta [data-slot="badge"] {
   min-height: 22px;
   padding: 1px 7px;
   font-size: 12px;
   line-height: 18px;
 }
 @media (max-width: 640px) {
-  .princeq-app .task-card-meta { column-gap: 14px; }
+  .task-card-meta { column-gap: 14px; }
 }
 
 .princeq-app .activity-filters label { display: block; margin-bottom: 4px; }
@@ -85,10 +89,22 @@ button[data-slot="select-trigger"] { font-weight: 400; }
 
 /* Keep touch targets and editable text usable on phones. */
 @media (pointer: coarse) {
-  .princeq-app .task-card .task-card-actions button { height: 40px; min-height: 40px; }
+  .task-card .task-card-actions button { height: 40px; min-height: 40px; }
   .princeq-app .activity-filters :is(input, select, button[data-slot="popover-trigger"]) { height: 40px; min-height: 40px; }
 }
 @media (max-width: 640px) {
   [data-slot="input"], [data-slot="textarea"],
   .princeq-app .activity-filters input { font-size: 16px; line-height: 24px; }
 }
+
+.task-execution-dialog { font-size: 14px; line-height: 1.5; }
+.task-assistant-markdown :is(p, ul, ol) + :is(p, ul, ol) { margin-top: 8px; }
+.task-assistant-markdown :is(ul, ol) { padding-left: 20px; }
+.task-assistant-markdown ul { list-style: disc; }
+.task-assistant-markdown ol { list-style: decimal; }
+.task-assistant-markdown :is(h1,h2,h3,h4) { font-size: 14px; font-weight: 600; margin: 10px 0 4px; }
+.task-assistant-markdown { overflow-wrap: anywhere; }
+
+.task-assistant-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; }
+.task-assistant-markdown :is(th,td) { min-width: 90px; border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+.task-assistant-markdown th { background: var(--muted); }

@@ -1,3 +1,7 @@
+import {resolveTaskSkillPreview,isTaskSkillPreview} from '../agent/task-skill-previews.ts';
+import {readTaskProgress} from '../agent/task-assistance-progress.ts';
+import {configureRecurrence, updateRecurrence, readRecurrence, occurrenceAction, controlRecurrence} from '../repo/recurrence.ts';
+import {readTaskAssistance, assistTask, acceptTaskAssistance} from '../agent/task-assistance.ts';
 /**
  * REST surface shared by the web UI and the future Skill.
  * Reference: docs/local-api.md (kept in sync with this file).
@@ -9,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import {discoverRuntimeModels} from '../agent/model-catalog.ts';
 import {z} from 'zod';
 import {deleteTask, deleteGoal, removeDependency} from '../repo/delete-service.ts';
-import {skillCatalog, skillOperationSchema, definitionFor, operationPath, type SkillOperation} from '../skills/catalog.ts';
+import {skillCatalog, skillOperationSchema, definitionFor, operationPath, operationVersion, type SkillOperation} from '../skills/catalog.ts';
 import {authorizePrinceQRequest} from '../skills/access.ts';
 import {buildPrinceQContext} from '../agent/prompt-context.ts';
 import {readInjectedPrinceQSkill} from '../skills/injection.ts';
@@ -373,6 +377,47 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
       return {result:task,target_id:task.id,summary:`移除「${task.title}」的依赖`,detail:{depends_on_id:body.depends_on_id},rehydrate:rehydrateTask(db())};
     });
     return {task:outcome.result,operation:outcome.operation,replayed:outcome.replayed};
+  });
+
+
+  router.get('/api/tasks/:id/recurrence',ctx=>{
+    if(!findTask(db(),ctx.params.id))throw notFound('任务不存在');
+    return {recurrence:readRecurrence(db(),ctx.params.id)};
+  });
+  const executionMutation=(ctx:RequestContext,type:string,work:()=>unknown)=>{
+    const outcome=withOperation(db(),{idempotency_key:keyFor(ctx,type),operation_type:type,target_type:'task',actor_id:DEFAULT_ACTOR_ID},()=>({result:work(),target_id:ctx.params.id,summary:`更新任务执行记录：${findTask(db(),ctx.params.id)?.title??''}`}));
+    return {task:findTask(db(),ctx.params.id),recurrence:readRecurrence(db(),ctx.params.id),result:outcome.result,replayed:outcome.replayed};
+  };
+  router.post('/api/tasks/:id/recurrence',ctx=>{
+    const body=parse(S.recurrenceConfigureSchema,ctx.body);
+    return executionMutation(ctx,'task.recurrence.configure',()=>configureRecurrence(db(),ctx.params.id,body,body.expected_version));
+  });
+  router.post('/api/tasks/:id/recurrence/update',ctx=>{const body=parse(S.recurrenceUpdateSchema,ctx.body);return executionMutation(ctx,'task.recurrence.update',()=>updateRecurrence(db(),ctx.params.id,body,body.expected_version));});
+  router.post('/api/tasks/:id/recurrence/control',ctx=>{
+    const body=parse(S.recurrenceControlSchema,ctx.body);
+    return executionMutation(ctx,'task.recurrence.control',()=>controlRecurrence(db(),ctx.params.id,body.action,body.expected_version));
+  });
+  router.post('/api/tasks/:id/occurrences/actions',ctx=>{
+    const body=parse(S.occurrenceActionSchema,ctx.body);
+    return executionMutation(ctx,'task.occurrence.'+body.action,()=>occurrenceAction(db(),ctx.params.id,body));
+  });
+  router.get('/api/tasks/:id/assistance/progress/:key',ctx=>{if(!findTask(db(),ctx.params.id))throw notFound('任务不存在');return readTaskProgress(ctx.params.id,ctx.params.key);});
+  router.get('/api/tasks/:id/assistance',ctx=>readTaskAssistance(db(),ctx.params.id));
+  router.post('/api/tasks/:id/assistance/messages',async ctx=>{
+    const body=parse(z.strictObject({message:z.string().trim().min(1).max(12000)}),ctx.body);
+    if(!ctx.idempotencyKey)throw badRequest('任务协助需要 Idempotency-Key');
+    return withVoiceRequest(ctx,signal=>assistTask(db(),ctx.params.id,body.message,ctx.idempotencyKey!,{signal}));
+  });
+  for(const action of ['confirm','cancel'] as const)router.post(`/api/tasks/:id/assistance/previews/:token/${action}`,ctx=>{
+    const body=parse(z.strictObject({confirmed:z.boolean().optional()}),ctx.body);
+    if(action==='confirm'&&body.confirmed!==true)throw badRequest('请先核对预览并显式确认');
+    if(readTaskAssistance(db(),ctx.params.id).busy)throw badRequest('Agent 正在回复，请等本轮完成再处理预览');
+    resolveTaskSkillPreview(db(),ctx.params.id,ctx.params.token,action,keyFor(ctx,'task-preview-'+action),(call,index)=>executeSkillOperation(ctx,call,index,ctx.params.token));
+    return readTaskAssistance(db(),ctx.params.id);
+  });
+  router.post('/api/tasks/:id/assistance/accept',ctx=>{
+    const body=parse(S.assistanceAcceptSchema,ctx.body);
+    return executionMutation(ctx,'task.assistance.accept',()=>acceptTaskAssistance(db(),ctx.params.id,body));
   });
 
   // ── quadrant ──────────────────────────────────────────────────────────────
@@ -1149,7 +1194,7 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
     // All original versions were checked together before the first action. Earlier actions
     // in this same synchronous transaction may legitimately have advanced a version.
     if ('expected_version' in payload && (def.target==='task'||def.target==='goal')) {
-      payload.expected_version=(def.target==='task'?findTask(db(),call.target_id!):findGoal(db(),call.target_id!))?.version;
+      payload.expected_version=operationVersion(db(),call);
     }
     if (call.operation==='task.action' && typeof payload.actor_id !== 'string') payload.actor_id=DEFAULT_ACTOR_ID;
     const result=matched.handler({...ctx,params:matched.params,url:new URL(path,ctx.url),body:payload,
@@ -1212,6 +1257,7 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
     authorizePrinceQRequest(ctx,action);
     const body=parse(z.strictObject({session_id:z.string().max(60).nullish(),confirmed:z.boolean().optional()}),ctx.body);
     if(action==='confirm'&&body.confirmed!==true)throw badRequest('确认需要显式 confirmed=true；请先向用户展示预览');
+    if(isTaskSkillPreview(db(),ctx.params.token))throw badRequest('请在对应任务的 AI 协助中确认或取消这份预览');
     const row=get<Row>(db(),'SELECT session_id FROM agent_pending_actions WHERE token = ?',[ctx.params.token]);
     if(!row)throw notFound('预览不存在');
     if(body.session_id && body.session_id !== row.session_id) throw badRequest('预览不属于指定会话');
@@ -1432,6 +1478,7 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
     authorizePrinceQRequest(ctx, 'confirm');
     const body = parse(S.agentPreviewConfirmSchema, ctx.body);
     const database = db();
+    if(isTaskSkillPreview(database,body.token))throw badRequest('请在对应任务的 AI 协助中确认这份预览');
     const session = ensureSession(database, body.session_id, 'Confirmation');
     const applied = confirmPendingActions(
       database,
@@ -1491,6 +1538,7 @@ export function buildRouter(dbFactory: () => Db = getDb): Router {
     authorizePrinceQRequest(ctx, 'cancel');
     const body = parse(S.agentPreviewCancelSchema, ctx.body);
     const database = db();
+    if(isTaskSkillPreview(database,body.token))throw badRequest('请在对应任务的 AI 协助中取消这份预览');
     const session = ensureSession(database, body.session_id, 'Cancelled the pending preview.');
     const applied = cancelPendingActions(database, body.token);
     const outcome = {

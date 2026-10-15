@@ -9,6 +9,7 @@
  * - 「取消」/关闭一律不写库；只有点「保存」才 PATCH，且带上 `expected_version`
  *   做乐观并发；同一保存点击走幂等键，冲突（409）时抽屉保持打开并提示。
  */
+import {useTaskExecution} from '@/hooks/task-execution-context';
 import { useMemo, useState } from 'react';
 import type { CognitiveLoad, DurationUnit, GoalWithProgress, TaskType } from '@shared/types';
 import { TASK_TYPES } from '@shared/types';
@@ -83,6 +84,7 @@ export function TaskDetailDrawer({
   onOpenChange: (open: boolean) => void;
 }) {
   const open = taskId !== null;
+  const {openTask}=useTaskExecution();
 
   // 按任务 id 独立加载：换任务立刻视为「旧数据」，不会把上一个任务的字段带进来。
   const detail = useResource<TaskDetail>(
@@ -212,6 +214,7 @@ export function TaskDetailDrawer({
   }, [task]);
 
   return (
+    <>
     <Sheet open={open} onOpenChange={close}>
       {/*
         手机（390/320）下全屏抽屉：w-full + inset-y-0 顶到底；桌面 sm 起限宽为近全屏。
@@ -257,6 +260,10 @@ export function TaskDetailDrawer({
                   />
                 ) : null}
 
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={()=>taskId&&openTask(taskId,'assistant')}>AI 协助此任务</Button>
+                  <Button size="sm" variant="outline" onClick={()=>taskId&&openTask(taskId,'recurrence')}>{task.recurrence?'循环与执行记录':'设为循环任务'}</Button>
+                </div>
                 <div className="space-y-3">
                   <div className="space-y-1.5">
                     <Label htmlFor="detail-title" className="text-xs font-normal">标题</Label>
@@ -473,6 +480,7 @@ export function TaskDetailDrawer({
         </ScrollArea>
       </SheetContent>
     </Sheet>
+    </>
   );
 }
 

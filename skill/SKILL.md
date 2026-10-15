@@ -1,17 +1,18 @@
 ---
 name: personal-work-queue
-description: "查询和管理 PrinceQ 的个人任务、目标、工作队列与个人设置；用于安排工作、任务和目标的增删查改、状态推进、依赖、评分及目标拆分。修改先预览确认。"
+description: "查询和管理 PrinceQ 的个人任务、目标、工作队列与个人设置；用于安排工作、任务和目标的增删查改、状态推进、小时/天/周/月循环、任务 AI 协助、依赖、评分及目标拆分。修改先预览确认。"
 ---
 
 # PrinceQ 工作管理
 
 通过 PrinceQ 本机 HTTP API 管理任务、目标和个人设置。API 默认 `http://127.0.0.1:28642`；外部 Agent 可用 `PWQ_API_BASE` 或客户端 `--base` 指定可达地址。客户端位于本 Skill 的 `scripts/pwq_client.py`，使用 Python 标准库，不依赖厂商 SDK。Windows 使用 `py -3` 或 Python 3 的 `python`，其他平台使用 `python3`；复杂 JSON 可经标准输入传给 `skill-propose --json -`，避免 shell 引号差异。不要直接改 SQLite、任务文件或习惯文件。
 
-## 两种调用方式
+## 调用方式
 
 - **PrinceQ 应用内 embedded 模式**：本 Skill 和操作合同由系统默认注入。上下文中已提供完整任务、目标、当前会话历史与个人设置。直接查询快照；写入只输出 `proposed_actions`，等待界面确认，不运行脚本或工具。通常使用 `skill_operation`；用户要求新建目标并连同第一批任务时，允许改用一个 `create_goal_with_tasks` 组合动作，在同一份待确认预览中列出目标和任务。
 
 `create_goal_with_tasks` 的 title、description、tasks 直接放在动作顶层，不使用 skill_operation 的 payload 包装。例如：`{"action":"create_goal_with_tasks","title":"目标名称","description":"目标成果","tasks":[{"title":"首个任务","description":"交付物与完成标准","minutes":30}]}`。普通 task.create/goal.create 继续使用 `{"action":"skill_operation","operation":"task.create","payload":{"title":"任务名称"}}` 形状。
+- **任务 AI 协助模式**：同一份 Skill、评分指导和本次操作合同每轮自动注入，使用独立任务会话；工作快照包含可操作任务和目标，不读取其他会话的私有对话。用户要求新增/编辑任务或调整循环时，只输出本次合同已列出的 `skill_operation` 到 `proposed_actions`。界面展示字段前后对比、确认/取消、执行结果；任何模型回复（包括“确认”）都不能代替用户点击确认。新草稿会替换该会话原pending草稿，读取最新预览状态，避免重复创建。
 - **其他 Agent 的 external 模式**：以 Skill 文件位置为基准找到客户端。先 `health`，再 `skill-context` 读取完整事实与个人设置，`skill-manifest` 获取最新操作合同。需要当前会话历史时传 `--session-id`；不能声称记得未提供的会话。
 
 ## 修改必须先预览
@@ -68,6 +69,22 @@ description: "查询和管理 PrinceQ 的个人任务、目标、工作队列与
 回答使用纯文本，尽量 2–5 句话：说明补齐了什么、重要假设/阻碍、建议顺序及“尚未创建，待确认”。不要使用 Markdown 加粗标记，不重复下方预览中的逐项描述和字段，不罗列所有内部 ID。必要澄清或容量冲突时可以多写少量句子，但不讲内部判定过程。
 
 同一会话及 model_previews 已有该目标的 pending 草稿时，提醒使用原预览，不再创建。用户明确修改草稿时，给新预览并提醒取消旧的；不能把旧草稿当作已确认事实。所有创建仍必须由用户确认，确认后读回记录才能声称完成。
+
+## 循环任务与任务 AI 协助
+
+目标需要持续练习、训练、复盘或定期执行时，区分一次性的准备工作和长期循环任务。已有“整理起点”“拟定计划”“试行一次”并不覆盖后续持续执行；例如30天健身目标可以补一项“按计划记录训练或恢复情况”，而不是复制30个同名任务。每日记录不等于每天训练，不得替用户编造适合的训练强度或健康事实。
+
+`task.create` 的 payload 可带 `recurrence`，`create_goal_with_tasks` 的每项 task 也可带同一字段：
+`{"start_date":"用户确定的YYYY-MM-DD","start_time":"09:00","interval":1,"unit":"day","timezone":"Asia/Shanghai","end_mode":"goal"}`。
+unit 支持 hour/day/week/month，interval 为1–365整数；小时按本地墙上时间推进，天/周按日历推进；月循环从原起点计算，遇到短月取该月最后一天（1月31日→2月28日→3月31日）。start_time 只影响小时循环。估时表示每次执行的预计耗时，不是整个循环的总耗时。
+
+关联目标的长期循环使用 end_mode=goal，结束日随目标 target_date 变动，不复制到子任务 deadline。目标日期或循环起点未明确时先询问，不自动把“30天”从当天起算。无关联目标用 end_mode=date 和 end_date。最多3660次。既有任务可用 task.recurrence.configure 设置循环，payload 为上述 recurrence 字段加 expected_version；调整已有计划用 task.recurrence.update，payload为完整recurrence字段加 expected_version（使用 recurrence.version）；start_date/start_time 表示新规则生效时间。从今天尚未记录的时段或未来日期开始，不能覆盖已打开、已完成或已跳过记录。生效前保留旧规则和历史，生效后按新间隔/单位生成日历；timezone沿用原值，end_mode=goal继续跟随目标日期。暂停/恢复使用 task.recurrence.control，expected_version同样是recurrence.version。新的或变更的计划依然先预览，得到用户确认后写入。
+
+读取 tasks/task 即含 recurrence：today_occurrence、next_date、总次数及每次 opened_at/status/note；GET /api/tasks/:id/recurrence 获取完整日历。日期键在非小时循环是 YYYY-MM-DD，小时循环为 YYYY-MM-DDTHH:mm。任务父状态与单次状态独立：完成今天不能结束整个循环。task.occurrence.action 的 payload 为 date、action（open/start/complete/skip/reopen）、expected_version（未记录时0）、可选 note；跳过必须说明原因。补记历史完成不伪造该日已打开；不能提前完成未来执行。不要用 task.action/complete 完成长期循环。整个循环到结束日且所有执行已完成/明确跳过后，才可 task.recurrence.control 的 finish；提前停止使用归档并说明后果。
+
+任务 AI 协助使用独立会话，与全局工作管理聊天隔离。CLI `task-assistance TASK_ID` 读取历史与产出，`task-assist-message TASK_ID --message '资料或问题'` 请求真实 Agent 持续协作；发送资料是对话，不会自动改变任务状态。应用内任务Agent也加载同一Skill，可以根据明确的对话要求生成创建/修改/循环调整预览；用户在当前任务对话里确认或取消，不能从另一个任务或全局会话代为确认。新消息用新幂等键，失败重试复用原键。此功能须先在个人设置启用并连接 Agent。外部 Agent 也可自行协助整理产出，但不能声称自己已调用网页中的独立 Agent。
+
+任务协助的完成必须由用户验收。通过 task.assistance.accept 提交 revision 与任务 expected_version 的待确认预览；普通任务采纳后完成，循环任务只完成产出对应的单次执行。没有可验收产出、任务在生成后改变、产出属于旧执行时段时应继续对话核对，不能换版本号强行确认。运行时上下文、会话、任务状态与实际运动是不同证据；模拟测试不能写成用户已真实完成训练。
 
 ## 个人设置与重试
 

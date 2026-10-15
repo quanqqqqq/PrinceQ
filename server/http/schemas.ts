@@ -72,9 +72,22 @@ const durationPairPresent = (value: Record<string, unknown>): boolean =>
 
 const DURATION_PAIR_MESSAGE = 'duration_value 与 duration_unit 必须同时提供（或同时省略）';
 
+
+const localDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+export const recurrenceSchema = z.strictObject({
+  start_date: localDate, start_time:z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('09:00'), interval:z.number().int().min(1).max(365), unit:z.enum(['hour','day','week','month']),
+  timezone:z.string().min(1).max(80).default('Asia/Shanghai'),
+  end_mode:z.enum(['goal','date']), end_date:localDate.nullish(),
+});
+export const recurrenceUpdateSchema=recurrenceSchema.extend({expected_version:z.number().int().positive()});
+export const recurrenceConfigureSchema = recurrenceSchema.extend({expected_version:z.number().int().positive()});
+export const occurrenceActionSchema = z.strictObject({date:z.string().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/),action:z.enum(['open','start','complete','skip','reopen']),note:z.string().max(4000).optional(),expected_version:z.number().int().min(0)});
+export const recurrenceControlSchema = z.strictObject({action:z.enum(['pause','resume','finish']),expected_version:z.number().int().positive()});
+
 export const createTaskSchema = z
   .object({
     title,
+    recurrence: recurrenceSchema.optional(),
     description: description,
     goal_id: z.string().trim().max(60).nullish(),
     deadline: isoDate.nullish(),
@@ -509,3 +522,5 @@ export const rescoringSubmitSchema = z.object({
 export const rescoringListQuerySchema = z.object({
   status: z.enum(RESCORING_STATUSES).optional(),
 });
+
+export const assistanceAcceptSchema=z.strictObject({revision:z.number().int().positive(),expected_version:z.number().int().positive()});

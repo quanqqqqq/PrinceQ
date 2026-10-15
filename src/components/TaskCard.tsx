@@ -5,6 +5,8 @@
  * 四象限页额外用到三个能力：稳定短编号、选中高亮，以及点击/悬停时回传任务 id
  * 以便定位散点图中的点。
  */
+import { occurrenceLabels, recurrenceUnitLabels } from '@shared/recurrence';
+import {useTaskExecution} from '@/hooks/task-execution-context';
 import { useState } from 'react';
 import {
   AlertTriangle,
@@ -16,6 +18,7 @@ import {
   Link2,
   ListOrdered,
   Sparkles,
+  Repeat2,
 } from 'lucide-react';
 import type { Quadrant, Task, TaskAction } from '@shared/types';
 import { resolveMatrixPlacement, type MatrixScoreFields } from '@shared/matrix-view';
@@ -114,13 +117,18 @@ export function TaskCard({
   onOpenDetail,
 }: TaskCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const {openTask}=useTaskExecution();
   const scoreBand = queuePriorityBand(score);
-  const primary = PRIMARY_ACTION[task.status];
+  const primary = task.recurrence ? null : PRIMARY_ACTION[task.status];
   const primaryAvailable = primary && availableActions.includes(primary) ? primary : null;
-  const secondary = availableActions.filter((action) => action !== primaryAvailable);
+  const secondary = availableActions.filter((action) => action !== primaryAvailable && (!task.recurrence || ['archive','restore'].includes(action)));
   const overdue = isOverdue(task.deadline);
   const busy = pendingLabel !== null;
   const placement = showMatrixScores ? resolveMatrixPlacement(task) : null;
+  const description = Array.from(demoText(task.description, task.is_demo).trim());
+  const descriptionPreview = description.length > 200
+    ? description.slice(0, 200).join('') + '…'
+    : description.join('');
   // 「为什么优先」默认只露两条最关键理由，完整评分依据在展开面板 / 详情抽屉里。
   const topReasons = showBreakdown && breakdown ? topReasonFactors(breakdown, 2) : [];
 
@@ -159,8 +167,7 @@ export function TaskCard({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
-            {/* 默认只突出标题；长描述在统一详情抽屉里查看 / 编辑。 */}
-            <h3 className={cn('font-semibold text-foreground',compact?'truncate text-sm':'line-clamp-2 text-[15px] leading-[22px]')}>
+            <h3 className={cn('min-w-0 break-words font-semibold leading-[22px] text-foreground', compact ? 'text-sm' : 'text-[15px]')}>
               {demoText(task.title, task.is_demo)}
             </h3>
             {score != null && scoreBand ? (
@@ -187,12 +194,18 @@ export function TaskCard({
             ) : null}
           </div>
 
+          {descriptionPreview ? (
+            <p className="task-card-description mt-1.5 whitespace-pre-wrap break-words text-muted-foreground">
+              {descriptionPreview}
+            </p>
+          ) : null}
+
           <dl className="task-card-meta mt-2.5">
             <div className="task-card-meta-item">
               <dt className="sr-only">状态</dt>
               <dd>
                 <Badge variant="outline" className={cn('font-normal', STATUS_CLASSES[task.status])}>
-                  {STATUS_LABELS[task.status]}
+                  {task.recurrence&&task.recurrence.status!=='ended'?(task.recurrence.status==='paused'?'循环暂停':'循环中'):STATUS_LABELS[task.status]}
                 </Badge>
               </dd>
             </div>
@@ -245,6 +258,12 @@ export function TaskCard({
               </div>
             ) : null}
           </dl>
+          {task.recurrence ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1"><Repeat2 className="size-3"/>{`每 ${task.recurrence.interval} ${recurrenceUnitLabels[task.recurrence.unit]}`}循环 · 至 {task.recurrence.effective_end_date}</span>
+            <span>{task.recurrence.status==='paused'?'循环已暂停':task.recurrence.status==='ended'?'循环已结束':task.recurrence.today_occurrence?`今天${task.recurrence.today_occurrence.opened_at?'已打开':'未打开'} · ${occurrenceLabels[task.recurrence.today_occurrence.status]}`:'今天无执行安排'}</span>
+            <span>已完成 {task.recurrence.completed}/{task.recurrence.total}</span>
+            {task.recurrence.plan_changes?.at(-1)?<span className="text-primary">{task.recurrence.plan_changes.at(-1)!.effective_from.slice(0,10)} 起每 {task.recurrence.plan_changes.at(-1)!.interval} {recurrenceUnitLabels[task.recurrence.plan_changes.at(-1)!.unit]}</span>:null}
+          </div> : null}
           {!task.dependency_ready && task.depends_on.length>0 ? <div className="mt-3"><Badge variant="outline" className="gap-1 border-amber-300 bg-amber-50 font-normal text-amber-700"><Link2 className="size-3"/>{task.depends_on.length} 项依赖未完成</Badge></div>:null}
 
           {task.blocked_reason ? (
@@ -330,6 +349,8 @@ export function TaskCard({
             className="task-card-actions mt-3 flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2"
             onClick={(event) => event.stopPropagation()}
           >
+            {task.recurrence ? <Button size="sm" variant="outline" onClick={()=>openTask(task.id,'recurrence')}><Repeat2/>循环记录</Button> : null}
+            <Button size="sm" variant="outline" disabled={busy} onClick={()=>openTask(task.id,'assistant')}><Sparkles/>AI 协助</Button>
             {primaryAvailable ? (
               <Button
                 // Desktop controls are compact; coarse pointers retain 40px targets in CSS.

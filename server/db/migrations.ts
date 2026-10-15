@@ -10,6 +10,7 @@ import type { Quadrant } from '../../shared/types.ts';
 // `./rescoring-ddl.ts` imports nothing, so pulling the DDL in here keeps the
 // single source of truth without reaching into `../repo/rescoring-service.ts`
 // (which imports `./connection.ts`, which imports this module — a cycle).
+import { TASK_EXECUTION_DDL } from './task-execution-ddl.ts';
 import { AGENT_PENDING_ACTIONS_DDL } from './agent-pending-actions-ddl.ts';
 import { RESCORING_REQUEST_DDL } from './rescoring-ddl.ts';
 
@@ -223,6 +224,19 @@ export function migrateAgentPendingActionsTable(db: Db): MigrationReport {
 
 /** Runs every pending migration. Idempotent; preserves all existing rows. */
 export function runMigrations(db: Db): MigrationReport {
+  for (const statement of TASK_EXECUTION_DDL.split(';').map(item=>item.trim()).filter(Boolean)) run(db, statement);
+  // Keep work created by older local recurrence prototypes intact.
+  for (const [table,columns] of Object.entries({
+    task_recurrences:{interval:'INTEGER NOT NULL DEFAULT 1',unit:"TEXT NOT NULL DEFAULT 'day'",start_time:"TEXT NOT NULL DEFAULT '09:00'"},
+    task_assistance_messages:{summary_json:"TEXT NOT NULL DEFAULT '[]'"},
+    task_assistance_sessions:{artifact_task_version:'INTEGER',artifact_date:'TEXT',ready:'INTEGER NOT NULL DEFAULT 0'},
+  })) {
+    const existing=columnNames(db,table);
+    for(const [name,ddl] of Object.entries(columns))if(!existing.has(name)) {
+      run(db,`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+      if(table==='task_recurrences'&&name==='interval'&&existing.has('every_days'))run(db,'UPDATE task_recurrences SET interval=every_days');
+    }
+  }
   const taskReport = migrateTasksMatrixScores(db);
   const goalReport = migrateGoalsStatus(db);
   const rescoringReport = migrateRescoringRequestsTable(db);

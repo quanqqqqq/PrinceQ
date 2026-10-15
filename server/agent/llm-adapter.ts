@@ -1,3 +1,4 @@
+import {SummaryPrefixStream} from './public-summary-stream.ts';
 /**
  * 真实模型适配器：把一条用户消息交给本地 CLI（claude / codex），再把回答收敛成
  * 既有的 `AgentResult` 形状。
@@ -50,52 +51,6 @@ interface ParsedReply {
   actions: PendingAction[];
   dropped: number;
   summary?: string[];
-}
-
-/** Only exposes the explicitly user-facing SUMMARY preamble, never provider reasoning events. */
-class SummaryPrefixStream {
-  private buffered = '';
-  private started = false;
-  private finished = false;
-  private emittedText = false;
-  private readonly emit: (delta: string) => void;
-
-  constructor(emit: (delta: string) => void) {
-    this.emit = emit;
-  }
-
-  push(chunk: string): void {
-    if (this.finished || !chunk) return;
-    this.buffered += chunk;
-    if (!this.started) {
-      const marker = /(?:^|\n)SUMMARY:\s*/i.exec(this.buffered);
-      if (!marker) {
-        if (this.buffered.length > 128) this.buffered = this.buffered.slice(-32);
-        return;
-      }
-      this.buffered = this.buffered.slice((marker.index ?? 0) + marker[0].length);
-      this.started = true;
-    }
-
-    const boundary = this.buffered.search(/[\r\n{]/);
-    const text = boundary < 0 ? this.buffered : this.buffered.slice(0, boundary);
-    const delta = this.emittedText ? text : text.replace(/^\s+/, '');
-    if (delta) {
-      this.emit(delta);
-      this.emittedText = true;
-    }
-    this.buffered = boundary < 0 ? '' : '';
-    if (boundary >= 0) this.finished = true;
-  }
-
-  finish(): void {
-    if (!this.finished && this.started && this.buffered) {
-      const delta = this.emittedText ? this.buffered : this.buffered.replace(/^\s+/, '');
-      if (delta) this.emit(delta);
-    }
-    this.buffered = '';
-    this.finished = true;
-  }
 }
 
 /**

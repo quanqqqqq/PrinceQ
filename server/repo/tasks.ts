@@ -6,6 +6,7 @@ import type {
   Task,
   TaskAssignment,
 } from '../../shared/types.ts';
+import { readRecurrence } from './recurrence.ts';
 import { all, get, toBool, type Db, type Row } from '../db/connection.ts';
 
 const TASK_SELECT = `
@@ -34,6 +35,7 @@ interface TaskGraph {
   blocks: Map<string, string[]>;
   statusById: Map<string, string>;
   assignments: Map<string, Row>;
+  db: Db;
 }
 
 function loadGraph(db: Db): TaskGraph {
@@ -56,7 +58,7 @@ function loadGraph(db: Db): TaskGraph {
        WHERE a.released_at IS NULL`,
     ).map((r) => [r.task_id, r]),
   );
-  return { dependsOn, blocks, statusById, assignments };
+  return { dependsOn, blocks, statusById, assignments, db };
 }
 
 function hydrateTask(row: Row, graph: TaskGraph): Task {
@@ -66,6 +68,7 @@ function hydrateTask(row: Row, graph: TaskGraph): Task {
   );
   return {
     id: row.id,
+    recurrence: readRecurrence(graph.db, row.id),
     title: row.title,
     description: row.description ?? null,
     goal_id: row.goal_id ?? null,

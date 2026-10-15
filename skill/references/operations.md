@@ -62,3 +62,15 @@ Windows 默认复制安装且支持重复更新，macOS/Linux 默认链接安装
 ## 真实对话场景测试
 
 在 PrinceQ 源码项目中运行 `npm run test:skills:conversation -- claude` 或 `npm run test:skills:conversation -- codex`。脚本自动使用独立端口、临时数据库/习惯/配置，按同一会话完成登记 → 查询 → 调整 → 删除；修改必须预览后确认，目标保留。可用 PWQ_SCENARIO_MODEL 指定从模型目录得到的标识。具体检查项见项目 docs/skill-conversation-scenario.md。此测试会真实调用模型，不能改为对现有 API 数据运行测试写入。
+
+
+### 循环任务与独立任务协助（合同 v4）
+
+- task.create.payload.recurrence 与组合目标动作中的 task.recurrence：`start_date`、`start_time`（默认09:00，仅小时有效）、`interval`（1–365）、`unit`（hour/day/week/month）、`timezone`（默认Asia/Shanghai）、`end_mode`（goal/date）、`end_date`（date模式必需）。关联目标必须已有日期；goal模式随目标日期结束。
+- task.recurrence.configure：target_id为任务，payload为上述字段加任务 expected_version。task.recurrence.control：action=pause/resume/finish，expected_version为 recurrence.version。
+- task.occurrence.action：date为日历键（小时含THH:mm），action=open/start/complete/skip/reopen，expected_version为当次版本（初始0），note可选，跳过必填。不能记录未来执行；只完成单次。
+- task.assistance.accept：target_id为任务，payload为产出 revision、任务 expected_version。必须用户验收，不能用生成回复代替确认。
+- 读取 `/api/tasks/:id/recurrence` 与 `/api/tasks/:id/assistance`；对话 `/api/tasks/:id/assistance/messages` body为message，必须带幂等键，不自动改任务。客户端提供 task-assistance、task-assist-message。
+
+- task.recurrence.update：target_id为已有循环任务，payload与recurrenceSchema相同，加 expected_version=recurrence.version。start_date/start_time定义未来生效点；不更改时区，不覆盖生效点之后已经存在的执行记录；确认前只模拟日历并展示次数与前后日期，确认后写入计划修订，保留此前的规则与记录。
+- 任务AI协助每轮注入Skill与合同，输出proposed_actions，不执行HTTP或脚本。GET /api/tasks/:id/assistance返回独立会话、previews与skill信息；POST /api/tasks/:id/assistance/previews/:token/confirm必须confirmed=true；cancel取消。确认端校验任务归属、版本与整批事务，支持幂等读回。不要在全局Agent入口确认任务会话的预览。

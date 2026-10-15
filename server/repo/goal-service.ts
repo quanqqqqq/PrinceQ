@@ -12,6 +12,8 @@ import type {
   QuadrantSuggestion,
   Task,
 } from '../../shared/types.ts';
+import {recordRecurrencePause,validateRecurrence} from './recurrence.ts';
+import { calendarDate } from '../../shared/recurrence.ts';
 import { all, get, run, type Db, type Row } from '../db/connection.ts';
 import { matchPhaseToExisting } from '../domain/decomposition.ts';
 import { inferQuadrant, QUADRANT_LABELS, ruleScore } from '../domain/quadrant.ts';
@@ -67,6 +69,12 @@ export function updateGoal(db: Db, id: string, input: UpdateGoalInput): GoalWith
     );
   }
 
+  if ('target_date' in input) {
+    for (const row of all<Row>(db,"SELECT r.* FROM task_recurrences r JOIN tasks t ON t.id=r.task_id WHERE t.goal_id=? AND r.end_mode='goal'",[id])) {
+      if (!input.target_date)throw badRequest('目标日期不能清空：仍有关联循环任务');
+      validateRecurrence(db,null,{...row as import('../../shared/recurrence.ts').RecurrenceInput,end_mode:'date',end_date:calendarDate(input.target_date,row.timezone)});
+    }
+  }
   const columns = ['title', 'description', 'status', 'target_date', 'color'] as const;
   const assignments: string[] = [];
   const params: (string | number | null)[] = [];
@@ -84,6 +92,7 @@ export function updateGoal(db: Db, id: string, input: UpdateGoalInput): GoalWith
     `UPDATE goals SET ${assignments.join(', ')}, updated_at = ?, version = version + 1 WHERE id = ?`,
     params,
   );
+  if(input.status && input.status!==current.status && (input.status==='paused'||current.status==='paused'))for(const row of all<Row>(db,'SELECT task_id FROM task_recurrences r JOIN tasks t ON t.id=r.task_id WHERE t.goal_id=?',[id]))recordRecurrencePause(db,row.task_id,'goal',input.status==='paused');
   return findGoal(db, id)!;
 }
 

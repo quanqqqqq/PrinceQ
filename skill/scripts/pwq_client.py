@@ -175,6 +175,17 @@ def submit_or_control(args, method, path, body, key):
     sys.exit(2)
 
 
+def cmd_task_assistance(args):
+    path = '/api/tasks/' + urllib.parse.quote(args.task_id, safe='') + '/assistance'
+    if args.command == 'task-assistance':
+        emit(request(args.base, 'GET', path))
+        return
+    body = {'message': args.message}
+    key = idempotency_key('POST', path + '/messages', body, 'task-assist-message', args.idempotency_key, args.new_key, args.stable_key)
+    print(f'idempotency-key: {key}', file=sys.stderr)
+    emit(request(args.base, 'POST', path + '/messages', body=body, key=key))
+
+
 def cmd_skill_manifest(args):
     emit(request(args.base, 'GET', '/api/skills/princeq'))
 
@@ -847,6 +858,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--session-id")
 
     # Portable Skill read/preview/confirmation entrypoints.
+    s=add('task-assistance',cmd_task_assistance,'read an isolated task Agent conversation and artifact')
+    s.add_argument('task_id')
+    s=add('task-assist-message',cmd_task_assistance,'continue a task conversation without completing the task')
+    s.add_argument('task_id');s.add_argument('--message',required=True)
     add('skill-manifest',cmd_skill_manifest,'read the current PrinceQ operation schemas')
     s=add('skill-context',cmd_skill_context,'complete tasks/goals/settings and optional session history')
     s.add_argument('--session-id')

@@ -1,0 +1,53 @@
+<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><title>任务 AI 协助语音与摘要隔离验收</title><body>
+<div style="padding:12px;display:flex;flex-wrap:wrap;gap:8px">
+<strong>模拟验收：不访问真实麦克风、数据库或外部 Agent。</strong>
+<button id="message-roles">加载消息来源样例</button><button id="long-history">加载长会话</button><button id="task-a">切换任务 A</button><button id="task-b">切换任务 B</button><button id="close-task">关闭任务面板</button><button id="open-task">打开任务面板</button><button id="tab">切换执行记录页签</button>
+<button id="sound">模拟说话</button><button id="quiet">模拟静音 0.5 秒</button><button id="finish-asr">返回识别结果</button><button id="finish-old">仅返回旧识别结果</button><button id="finish-agent">返回 Agent 回复</button><button id="fail-agent">模拟 Agent 失败</button><p id="report" role="status"></p>
+</div><div id="root"></div>
+<script type="module">
+import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
+import {TaskAssistant} from '../src/components/TaskExecutionDialog.tsx';
+import {AgentPanel} from '../src/components/AgentPanel.tsx';
+import {WorkspaceProvider} from '../src/hooks/use-workspace.tsx';
+import {AgentConversationProvider} from '../src/hooks/agent-conversation-provider.tsx';
+import '../src/index.css';
+const requests=[],turns=[],histories={a:[],b:[]};let processor,stops=0,selected='a';
+const report=()=>{document.querySelector('#report').textContent=`当前任务 ${selected.toUpperCase()}；识别请求 ${requests.length}；已取消 ${requests.filter(r=>r.signal.aborted).length}；停止轨道 ${stops}；发送 ${turns.length}`;};
+const storage=new Map();Object.defineProperty(window,'localStorage',{value:{getItem:k=>storage.get(k)??null,setItem:(k,v)=>storage.set(k,v)}});
+Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async()=>({getTracks:()=>[{stop:()=>{stops++;report();}}]})}});
+window.AudioContext=class {sampleRate=16000;destination={};createMediaStreamSource(){return {connect(){},disconnect(){}};}createScriptProcessor(){processor={onaudioprocess:null,connect(){},disconnect(){}};return processor;}createGain(){return {gain:{value:0},connect(){},disconnect(){}};}resume(){return Promise.resolve();}close(){return Promise.resolve();}};
+const json=value=>new Response(JSON.stringify(value),{status:200,headers:{'content-type':'application/json'}});
+window.fetch=async(url,options={})=>{
+ const path=String(url);
+ if(path.endsWith('/voice/status'))return json({backend:'fixture',asr:{available:true,reason:null},tts:{available:true,reason:null}});
+ if(path.endsWith('/voice/transcribe'))return new Promise(resolve=>{requests.push({resolve,signal:options.signal,task:selected});options.signal.addEventListener('abort',report,{once:true});report();});
+ if(path.includes('/assistance/progress/'))return json({request_id:path.split('/').at(-1),phase:'response',message:'Agent 已开始返回公开处理摘要',summary_text:'正在核对当前任务资料，并整理待确认事项。',started_at:new Date().toISOString(),updated_at:new Date().toISOString()});
+ const task=/\/tasks\/([ab])\/assistance/.exec(path)?.[1];
+ if(task&&path.endsWith('/messages')) {
+  const message=JSON.parse(options.body).message;return new Promise(resolve=>{turns.push({resolve,task,message,key:options.headers['Idempotency-Key']});report();});
+ }
+ if(task)return json({session:null,messages:histories[task],busy:turns.some(turn=>turn.task===task&&!turn.done)});
+ if(path.endsWith('/agent/runtime-status'))return json({configured:false,enabled:false,provider:null,health:{ok:false,reason:'health_unknown',checked_at:null},effective_mode:'deterministic-local',background:{implemented:false,status:'not_implemented'}});
+ if(path.endsWith('/agent/sessions'))return json({sessions:[],next_cursor:null});
+ if(path.endsWith('/queue'))return json({entries:[]});
+ throw new Error('Unexpected fixture request: '+path);
+};
+const finish=cancelledOnly=>{for(const r of requests.filter(r=>!r.done&&(!cancelledOnly||r.signal.aborted))){r.done=true;r.resolve(json({text:r.task==='a'?'任务A的模拟识别文字':'任务B的模拟识别文字'}));}};
+document.querySelector('#finish-asr').onclick=()=>finish(false);document.querySelector('#finish-old').onclick=()=>finish(true);
+const emit=(ms,level)=>processor?.onaudioprocess?.({inputBuffer:{getChannelData:()=>new Float32Array(ms*16).fill(level)}});
+document.querySelector('#sound').onclick=()=>emit(200,0.1);document.querySelector('#quiet').onclick=()=>emit(500,0);
+document.querySelector('#finish-agent').onclick=()=>{for(const t of turns.filter(t=>!t.done)){t.done=true;const at=new Date().toISOString();histories[t.task].push({id:crypto.randomUUID(),role:'user',content:t.message,request_key:t.key,created_at:at},{id:crypto.randomUUID(),role:'assistant',request_key:t.key,content:'这是独立任务的模拟回复，实际资料仍需你确认。',summary:['核对了当前任务的资料','整理了需要进一步确认的信息'],created_at:at});t.resolve(json({session:null,messages:histories[t.task],busy:false}));}};
+document.querySelector('#fail-agent').onclick=()=>{for(const turn of turns.filter(turn=>!turn.done)){turn.done=true;turn.resolve(new Response(JSON.stringify({error:{code:'unavailable',message:'模拟 Agent 请求失败，请重试'}}),{status:503,headers:{'content-type':'application/json'}}));}};
+function App(){const [id,setId]=useState('a'),[open,setOpen]=useState(true),[active,setActive]=useState(true),[revision,setRevision]=useState(0);
+ document.querySelector('#message-roles').onclick=()=>{histories[selected]=[
+  {role:'user',content:'请先预览，把记录任务调整为每两天执行。'},
+  {role:'assistant',content:'可以。我会保留已有执行记录，并先展示循环计划的修改预览，等你确认后再执行。'},
+  {role:'assistant',operation_result:true,content:'已取消这份预览，没有修改任务或循环计划。'},
+ ].map((message,index)=>({...message,id:'role-'+selected+'-'+index,created_at:new Date().toISOString()}));setRevision(value=>value+1);};
+ document.querySelector('#long-history').onclick=()=>{histories[selected]=Array.from({length:14},(_,index)=>({id:'long-'+selected+'-'+index,role:index%2?'assistant':'user',content:`第${index+1}条历史消息：`+'用于验证长会话的滚动位置。'.repeat(16),created_at:new Date().toISOString()}));setRevision(value=>value+1);};
+ document.querySelector('#task-a').onclick=()=>{selected='a';setId('a');setOpen(true);setActive(true);report();};document.querySelector('#task-b').onclick=()=>{selected='b';setId('b');setOpen(true);setActive(true);report();};document.querySelector('#close-task').onclick=()=>setOpen(false);document.querySelector('#open-task').onclick=()=>{setOpen(true);setActive(true);};document.querySelector('#tab').onclick=()=>setActive(v=>!v);
+ const task={id,title:id==='a'?'整理训练起点与健康限制':'拟定30天训练与恢复计划',description:'模拟隔离验收任务',version:1,status:'inbox',recurrence:null};
+ return React.createElement(WorkspaceProvider,null,React.createElement(AgentConversationProvider,null,React.createElement('div',{style:{display:'grid',gridTemplateColumns:'600px 480px',gap:20,padding:16}},React.createElement('div',{style:{border:'1px solid #ddd',padding:12,height:600,display:'flex',flexDirection:'column'}},React.createElement('h2',null,task.title),open?React.createElement(TaskAssistant,{key:id+revision,task,active}):'任务面板已关闭'),React.createElement('div',{style:{height:600,border:'1px solid #ddd'}},React.createElement(AgentPanel)))));
+}
+report();createRoot(document.querySelector('#root')).render(React.createElement(App));
+</script></body></html>
